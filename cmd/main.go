@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/schema"
@@ -26,23 +28,41 @@ func main() {
 	// 3. 准备消息
 	messages := []*schema.Message{
 		schema.SystemMessage("你是一个友好的 AI 助手"),
-		schema.UserMessage("你好，请介绍一下 Eino 框架"),
 	}
 
-	// 4. 调用模型生成响应
-	response, err := chatModel.Generate(ctx, messages)
-	if err != nil {
-		log.Fatalf("生成响应失败: %v", err)
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Println("对话开始（输入'exit'退出会话）：")
+
+	for {
+		fmt.Print("\n你: ")
+		if !scanner.Scan() {
+			break
+		}
+
+		userInput := strings.TrimSpace(scanner.Text())
+		if userInput == "exit" {
+			fmt.Println("再见！")
+			break
+		}
+
+		if userInput == "" {
+			continue
+		}
+
+		// 添加用户消息
+		messages = append(messages, schema.UserMessage(userInput))
+
+		// 生成 AI 响应
+		response, err := chatModel.Generate(ctx, messages)
+		if err != nil {
+			log.Printf("生成失败: %v", err)
+			continue
+		}
+
+		// 添加 AI 响应到历史
+		messages = append(messages, response)
+
+		fmt.Printf("\nAI: %s\n", response.Content)
 	}
 
-	// 5. 输出结果
-	fmt.Printf("AI 响应: %s\n", response.Content)
-
-	// 6. 输出 token 使用情况
-	if response.ResponseMeta != nil && response.ResponseMeta.Usage != nil {
-		fmt.Printf("\nToken 使用统计:\n")
-		fmt.Printf("  输入 Token: %d\n", response.ResponseMeta.Usage.PromptTokens)
-		fmt.Printf("  输出 Token: %d\n", response.ResponseMeta.Usage.CompletionTokens)
-		fmt.Printf("  总计 Token: %d\n", response.ResponseMeta.Usage.TotalTokens)
-	}
 }
