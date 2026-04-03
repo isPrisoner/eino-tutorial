@@ -34,7 +34,7 @@ func main() {
 	fmt.Println("对话开始（输入'exit'退出会话）：")
 
 	for {
-		fmt.Print("\n你: ")
+		fmt.Print("你: ")
 		if !scanner.Scan() {
 			break
 		}
@@ -52,17 +52,50 @@ func main() {
 		// 添加用户消息
 		messages = append(messages, schema.UserMessage(userInput))
 
-		// 生成 AI 响应
-		response, err := chatModel.Generate(ctx, messages)
+		// 生成 AI 响应（流式输出）
+		var fullMessage *schema.Message
+
+		// 使用流式输出
+		streamReader, err := chatModel.Stream(ctx, messages)
 		if err != nil {
-			log.Printf("生成失败: %v", err)
+			log.Printf("创建流式请求失败: %v", err)
 			continue
 		}
 
-		// 添加 AI 响应到历史
-		messages = append(messages, response)
+		// 读取流式响应，收到第一个 chunk 时才打印 "AI: " 前缀
+		firstChunk := true
+		for {
+			chunk, err := streamReader.Recv()
+			if err != nil {
+				if err.Error() == "EOF" {
+					break // 正常结束
+				}
+				log.Printf("接收流式数据失败: %v", err)
+				break
+			}
 
-		fmt.Printf("\nAI: %s\n", response.Content)
+			// 合并消息碎片
+			if fullMessage == nil {
+				fullMessage = chunk
+			} else {
+				fullMessage, _ = schema.ConcatMessages([]*schema.Message{fullMessage, chunk})
+			}
+
+			if chunk.Content != "" {
+				if firstChunk {
+					fmt.Print("AI: ")
+					firstChunk = false
+				}
+				fmt.Print(chunk.Content) // 实时输出
+			}
+		}
+
+		fmt.Print("\n\n") // 换行
+
+		// 将完整的响应消息添加到历史记录
+		if fullMessage != nil {
+			messages = append(messages, fullMessage)
+		}
 	}
 
 }
