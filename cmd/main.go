@@ -32,23 +32,6 @@ func NewChatBot(ctx context.Context, chatModel model.BaseChatModel) *ChatBot {
 	}
 }
 
-// ChatGenerate 进行非流式对话
-func (cb *ChatBot) ChatGenerate(userInput string, opts ...model.Option) (*schema.Message, error) {
-	// 添加用户消息
-	cb.messages = append(cb.messages, schema.UserMessage(userInput))
-
-	// 生成回复
-	response, err := cb.model.Generate(cb.ctx, cb.messages, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("生成响应失败: %w", err)
-	}
-
-	// 添加助手响应到历史记录
-	cb.messages = append(cb.messages, response)
-
-	return response, nil
-}
-
 // ChatStream 进行流式对话
 func (cb *ChatBot) ChatStream(userInput string, opts ...model.Option) error {
 	// 添加用户消息
@@ -139,6 +122,6 @@ func main() {
 			continue
 		}
 
-		fmt.Println() // 换行
+		fmt.Println()
 	}
 }
