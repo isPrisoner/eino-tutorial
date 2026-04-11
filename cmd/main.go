@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,25 +15,33 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 	"github.com/volcengine/volcengine-go-sdk/service/arkruntime"
 	arkruntimeModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
+
+	"eino-tutorial/internal/textsplitter"
+	"eino-tutorial/internal/vectorstore"
+	milvusStore "eino-tutorial/internal/vectorstore/milvus"
 )
+
+var debugMode = os.Getenv("DEBUG") == "true"
+
+// debugLog 仅在 DEBUG=true 时输出日志
+func debugLog(format string, args ...interface{}) {
+	if debugMode {
+		log.Printf(format, args...)
+	}
+}
 
 // ChatBot 结构体，使用 eino BaseChatModel 接口和 ChatTemplate
 type ChatBot struct {
-	model     model.BaseChatModel
-	ctx       context.Context
-	messages  []*schema.Message
-	templates map[string]prompt.ChatTemplate
-	embedder  embedding.Embedder // 嵌入器用于 RAG
-	documents []*Document        // 文档存储
-}
-
-// Document 文档结构
-type Document struct {
-	ID        string
-	Content   string
-	Embedding []float64
+	model        model.BaseChatModel
+	ctx          context.Context
+	messages     []*schema.Message
+	templates    map[string]prompt.ChatTemplate
+	embedder     embedding.Embedder         // 嵌入器用于 RAG
+	vectorstore  vectorstore.VectorStore    // 向量存储
+	textsplitter *textsplitter.TextSplitter // 文本切分器
 }
 
 // VolcengineEmbedder 火山引擎嵌入器实现
@@ -88,16 +96,17 @@ func (ve *VolcengineEmbedder) EmbedStrings(ctx context.Context, texts []string, 
 }
 
 // NewChatBot 创建新的聊天机器人实例
-func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, embedder embedding.Embedder) *ChatBot {
+func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, embedder embedding.Embedder, vs vectorstore.VectorStore, ts *textsplitter.TextSplitter) *ChatBot {
 	bot := &ChatBot{
 		model: chatModel,
 		ctx:   ctx,
 		messages: []*schema.Message{
 			schema.SystemMessage("你是一个友好的 AI 助手"),
 		},
-		templates: make(map[string]prompt.ChatTemplate),
-		embedder:  embedder,
-		documents: make([]*Document, 0),
+		templates:    make(map[string]prompt.ChatTemplate),
+		embedder:     embedder,
+		vectorstore:  vs,
+		textsplitter: ts,
 	}
 
 	// 初始化模板
@@ -227,48 +236,56 @@ func (cb *ChatBot) AddDocument(id, content string) error {
 	if cb.embedder == nil {
 		return fmt.Errorf("嵌入器未初始化")
 	}
+	if cb.vectorstore == nil {
+		return fmt.Errorf("向量存储未初始化")
+	}
+	if cb.textsplitter == nil {
+		return fmt.Errorf("文本切分器未初始化")
+	}
 
-	// 生成文档的向量
-	embeddings, err := cb.embedder.EmbedStrings(cb.ctx, []string{content})
+	// 1. 文本切分
+	chunks := cb.textsplitter.Split(content)
+	if len(chunks) == 0 {
+		return fmt.Errorf("文本切分后没有有效分块")
+	}
 
+	// 2. 批量生成向量
+	embeddings, err := cb.embedder.EmbedStrings(cb.ctx, chunks)
 	if err != nil {
 		return fmt.Errorf("生成文档向量失败: %w", err)
 	}
 
-	doc := &Document{
-		ID:        id,
-		Content:   content,
-		Embedding: embeddings[0],
+	// 3. 构建文档列表
+	docs := make([]*vectorstore.Document, 0, len(chunks))
+	for i, chunk := range chunks {
+		doc := &vectorstore.Document{
+			ID:         uuid.New().String(),
+			Content:    chunk,
+			Vector:     embeddings[i],
+			DocID:      id,
+			ChunkIndex: int64(i),
+			Source:     "manual",
+			Metadata:   map[string]string{"original_length": strconv.Itoa(len(content))},
+		}
+		docs = append(docs, doc)
 	}
 
-	cb.documents = append(cb.documents, doc)
+	// 4. 批量插入 Milvus
+	if err := cb.vectorstore.InsertDocuments(cb.ctx, docs); err != nil {
+		return fmt.Errorf("插入向量存储失败: %w", err)
+	}
+
+	debugLog("成功添加文档 %s，切分为 %d 个分块", id, len(chunks))
 	return nil
 }
 
-// cosineSimilarity 计算余弦相似度
-func cosineSimilarity(a, b []float64) float64 {
-	if len(a) != len(b) {
-		return 0
-	}
-
-	var dotProduct, normA, normB float64
-	for i := range a {
-		dotProduct += a[i] * b[i]
-		normA += a[i] * a[i]
-		normB += b[i] * b[i]
-	}
-
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-
-	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
-}
-
 // SearchDocuments 搜索相关文档
-func (cb *ChatBot) SearchDocuments(query string, topK int) ([]*Document, error) {
+func (cb *ChatBot) SearchDocuments(query string, topK int) ([]*vectorstore.Document, error) {
 	if cb.embedder == nil {
 		return nil, fmt.Errorf("嵌入器未初始化")
+	}
+	if cb.vectorstore == nil {
+		return nil, fmt.Errorf("向量存储未初始化")
 	}
 
 	// 生成查询向量
@@ -279,37 +296,13 @@ func (cb *ChatBot) SearchDocuments(query string, topK int) ([]*Document, error) 
 
 	queryEmbedding := embeddings[0]
 
-	// 计算相似度
-	type docScore struct {
-		doc   *Document
-		score float64
+	// 使用 Milvus 搜索
+	docs, err := cb.vectorstore.Search(cb.ctx, queryEmbedding, topK)
+	if err != nil {
+		return nil, fmt.Errorf("搜索失败: %w", err)
 	}
 
-	var scores []docScore
-	for _, doc := range cb.documents {
-		score := cosineSimilarity(queryEmbedding, doc.Embedding)
-		scores = append(scores, docScore{doc: doc, score: score})
-	}
-
-	// 排序并返回 topK
-	for i := 0; i < len(scores); i++ {
-		for j := i + 1; j < len(scores); j++ {
-			if scores[i].score < scores[j].score {
-				scores[i], scores[j] = scores[j], scores[i]
-			}
-		}
-	}
-
-	if topK > len(scores) {
-		topK = len(scores)
-	}
-
-	result := make([]*Document, topK)
-	for i := 0; i < topK; i++ {
-		result[i] = scores[i].doc
-	}
-
-	return result, nil
+	return docs, nil
 }
 
 // ChatWithRAG 使用 RAG 进行对话
@@ -320,21 +313,36 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 		return fmt.Errorf("搜索文档失败: %w", err)
 	}
 
+	// 调试：打印检索结果
+	debugLog("检索结果数量: %d", len(docs))
+	for i, doc := range docs {
+		debugLog("检索结果[%d]: doc_id=%s, chunk_index=%d, score=%.4f, content=%s", i, doc.DocID, doc.ChunkIndex, doc.Score, doc.Content)
+	}
+
 	// 构建上下文
 	conText := ""
 	if len(docs) > 0 {
-		conText = "参考文档：\n"
-		for i, doc := range docs {
-			conText += fmt.Sprintf("%d. %s\n", i+1, doc.Content)
+		conText = "【上下文】\n"
+		for _, doc := range docs {
+			conText += fmt.Sprintf("%s\n", doc.Content)
 		}
 		conText += "\n"
 	}
 
-	// 构建增强的用户消息
-	enhancedQuery := conText + "用户问题：" + query
+	// 构建标准 RAG prompt
+	prompt := fmt.Sprintf(`你是一个基于知识库的问答助手，请严格根据上下文回答。
+
+%s
+【问题】
+%s
+
+如果上下文中没有答案，请说不知道。`, conText, query)
+
+	// 调试：打印完整 prompt
+	debugLog("RAG Prompt: %s", prompt)
 
 	// 添加用户消息
-	cb.messages = append(cb.messages, schema.UserMessage(enhancedQuery))
+	cb.messages = append(cb.messages, schema.UserMessage(prompt))
 
 	// 获取流式回复
 	reader, err := cb.model.Stream(cb.ctx, cb.messages, opts...)
@@ -447,11 +455,68 @@ func main() {
 		fmt.Println("未设置 EMBEDDER 环境变量，RAG 功能将不可用")
 	}
 
-	// 4. 创建聊天机器人（使用 BaseChatModel 接口）
-	chatBot := NewChatBot(ctx, chatModel, embedder)
+	// 4. 创建 Milvus 向量存储
+	var vs vectorstore.VectorStore
+	if embedder != nil {
+		milvusAddress := os.Getenv("MILVUS_ADDRESS")
+		if milvusAddress == "" {
+			milvusAddress = "127.0.0.1:19530"
+		}
+
+		milvusDim := 2048
+		if dimStr := os.Getenv("MILVUS_DIMENSION"); dimStr != "" {
+			if d, err := strconv.Atoi(dimStr); err == nil {
+				milvusDim = d
+			}
+		}
+
+		milvusTopK := 3
+		if topKStr := os.Getenv("MILVUS_TOPK"); topKStr != "" {
+			if k, err := strconv.Atoi(topKStr); err == nil {
+				milvusTopK = k
+			}
+		}
+
+		store, err := milvusStore.NewMilvusStore(ctx, milvusAddress, milvusDim, milvusTopK)
+		if err != nil {
+			log.Printf("创建 Milvus 存储失败: %v (RAG功能将不可用)", err)
+			vs = nil
+		} else {
+			vs = store
+			debugLog("Milvus 向量存储已启用 (address=%s, dim=%d, topK=%d)", milvusAddress, milvusDim, milvusTopK)
+		}
+	} else {
+		vs = nil
+	}
+
+	// 5. 创建文本切分器
+	var splitter *textsplitter.TextSplitter
+	if vs != nil {
+		chunkSize := 500
+		if sizeStr := os.Getenv("CHUNK_SIZE"); sizeStr != "" {
+			if s, err := strconv.Atoi(sizeStr); err == nil {
+				chunkSize = s
+			}
+		}
+
+		chunkOverlap := 50
+		if overlapStr := os.Getenv("CHUNK_OVERLAP"); overlapStr != "" {
+			if o, err := strconv.Atoi(overlapStr); err == nil {
+				chunkOverlap = o
+			}
+		}
+
+		splitter = textsplitter.NewTextSplitter(chunkSize, chunkOverlap)
+		debugLog("文本切分器已启用 (chunk_size=%d, chunk_overlap=%d)", chunkSize, chunkOverlap)
+	} else {
+		splitter = nil
+	}
+
+	// 6. 创建聊天机器人（使用 BaseChatModel 接口）
+	chatBot := NewChatBot(ctx, chatModel, embedder, vs, splitter)
 
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("=== Eino ChatBot with Templates & RAG ===")
+	fmt.Println("=== Eino ChatBot with Templates & RAG (Milvus) ===")
 	fmt.Println("可用命令：")
 	fmt.Println("  /translate <文本> <目标语言>      - 翻译")
 	fmt.Println("  /code <需求> <语言>               - 代码生成")
@@ -462,6 +527,7 @@ func main() {
 	fmt.Println("  exit                              - 退出")
 	fmt.Println("=====================================")
 
+	docCounter := 0
 	for {
 		fmt.Print("\n你: ")
 		if !scanner.Scan() {
@@ -527,12 +593,14 @@ func main() {
 			case "/add":
 				if len(parts) > 1 {
 					content := strings.Join(parts[1:], " ")
-					docID := fmt.Sprintf("doc_%d", len(chatBot.documents)+1)
+					docCounter++
+					docID := fmt.Sprintf("doc_%d", docCounter)
 					err := chatBot.AddDocument(docID, content)
 					if err != nil {
 						log.Printf("添加文档失败: %v", err)
+						docCounter-- // 失败则回退计数
 					} else {
-						fmt.Printf("成功添加文档: %s\n", docID)
+						debugLog("成功添加文档: %s", docID)
 					}
 				} else {
 					fmt.Println("用法: /add <文档内容>")
