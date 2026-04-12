@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +27,35 @@ import (
 	milvusStore "eino-tutorial/internal/vectorstore/milvus"
 )
 
-var debugMode = os.Getenv("DEBUG") == "true"
+var (
+	debugMode = os.Getenv("DEBUG") == "true"
+
+	// RAG 配置（从环境变量读取，提供默认值）
+	ragMinScore         = getEnvFloat("RAG_MIN_SCORE", 0.5)
+	ragTopK             = getEnvInt("RAG_TOPK", 5)
+	ragMaxContextLen    = getEnvInt("RAG_MAX_CONTEXT_LEN", 2000)
+	ragMaxContextChunks = getEnvInt("RAG_MAX_CONTEXT_CHUNKS", 10)
+)
+
+// getEnvFloat 从环境变量读取浮点数，提供默认值
+func getEnvFloat(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if f, err := strconv.ParseFloat(value, 64); err == nil {
+			return f
+		}
+	}
+	return defaultValue
+}
+
+// getEnvInt 从环境变量读取整数，提供默认值
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if i, err := strconv.Atoi(value); err == nil {
+			return i
+		}
+	}
+	return defaultValue
+}
 
 // debugLog 仅在 DEBUG=true 时输出日志
 func debugLog(format string, args ...interface{}) {
@@ -287,11 +316,6 @@ func (cb *ChatBot) AddFile(filePath string) (*fileimport.FileImportResult, error
 		Success: false,
 	}
 
-	// 调试：打印工作目录和文件路径
-	wd, _ := os.Getwd()
-	debugLog("当前工作目录: %s", wd)
-	debugLog("尝试访问文件: %s", filePath)
-
 	// 1. 检查文件是否存在
 	if _, err := os.Stat(filePath); err != nil {
 		result.Error = fmt.Errorf("文件不存在: %w", err)
@@ -462,7 +486,7 @@ func (cb *ChatBot) SearchDocuments(query string, topK int) ([]*vectorstore.Docum
 // ChatWithRAG 使用 RAG 进行对话
 func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	// 搜索相关文档
-	docs, err := cb.SearchDocuments(query, 3)
+	docs, err := cb.SearchDocuments(query, ragTopK)
 	if err != nil {
 		return fmt.Errorf("搜索文档失败: %w", err)
 	}
@@ -470,33 +494,103 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	// 调试：打印检索结果
 	debugLog("检索结果数量: %d", len(docs))
 	for i, doc := range docs {
-		debugLog("检索结果[%d]: doc_id=%s, chunk_index=%d, score=%.4f, content=%s", i, doc.DocID, doc.ChunkIndex, doc.Score, doc.Content)
+		debugLog("检索结果[%d]: doc_id=%s, chunk_index=%d, score=%.4f", i, doc.DocID, doc.ChunkIndex, doc.Score)
 	}
 
-	// 构建上下文
-	conText := ""
-	if len(docs) > 0 {
-		conText = "【上下文】\n"
-		for _, doc := range docs {
-			conText += fmt.Sprintf("%s\n", doc.Content)
+	// 1. 分数阈值过滤
+	var filteredDocs []*vectorstore.Document
+	for _, doc := range docs {
+		if doc.Score >= ragMinScore {
+			filteredDocs = append(filteredDocs, doc)
 		}
-		conText += "\n"
+	}
+	debugLog("过滤后结果数量: %d", len(filteredDocs))
+
+	// 2. 无结果保护
+	if len(filteredDocs) == 0 {
+		fmt.Println("AI (RAG): 我不知道。")
+		return nil
 	}
 
-	// 构建标准 RAG prompt
-	prompt := fmt.Sprintf(`你是一个基于知识库的问答助手，请严格根据上下文回答。
+	// 3. 第一层去重：按 doc_id + chunk_index
+	uniqueDocs := make(map[string]*vectorstore.Document) // key: doc_id:chunk_index
+	for _, doc := range filteredDocs {
+		key := fmt.Sprintf("%s:%d", doc.DocID, doc.ChunkIndex)
+		existing, exists := uniqueDocs[key]
+		if !exists || doc.Score > existing.Score {
+			uniqueDocs[key] = doc
+		}
+	}
 
+	// 4. 第二层去重：按 content 兜底
+	seenContent := make(map[string]bool)
+	var dedupedDocs []*vectorstore.Document
+	for _, doc := range uniqueDocs {
+		if !seenContent[doc.Content] {
+			seenContent[doc.Content] = true
+			dedupedDocs = append(dedupedDocs, doc)
+		}
+	}
+	debugLog("双层去重后结果数量: %d", len(dedupedDocs))
+
+	// 5. 按分数降序排序
+	sort.Slice(dedupedDocs, func(i, j int) bool {
+		return dedupedDocs[i].Score > dedupedDocs[j].Score
+	})
+
+	// 6. 构建上下文（限制长度和 chunk 数）
+	contextBuilder := strings.Builder{}
+	totalLen := 0
+	chunkCount := 0
+	for _, doc := range dedupedDocs {
+		content := doc.Content + "\n"
+
+		// 检查 chunk 数限制
+		if chunkCount >= ragMaxContextChunks {
+			debugLog("达到最大 chunk 数 %d，停止拼接", ragMaxContextChunks)
+			break
+		}
+
+		// 检查长度限制
+		if totalLen+len(content) > ragMaxContextLen {
+			debugLog("上下文达到最大长度 %d，停止拼接", ragMaxContextLen)
+			break
+		}
+
+		contextBuilder.WriteString(content)
+		totalLen += len(content)
+		chunkCount++
+	}
+	conText := contextBuilder.String()
+
+	debugLog("上下文总长度: %d 字符, chunk 数: %d", totalLen, chunkCount)
+
+	// 7. 构建优化后的 promptWord（不包含【上下文】标签）
+	promptWord := fmt.Sprintf(`你是一个基于知识库的问答助手，请严格根据上下文回答。
+
+【重要要求】
+1. 必须完整列出上下文中的全部关键信息
+2. 不要遗漏任何相关信息
+3. 如果上下文中有多个相关点，请全部列出
+4. 如果上下文中包含多个答案，必须完整列出全部答案，不要遗漏
+5. 严格基于上下文回答，不要编造信息
+
+【上下文】
 %s
+
 【问题】
 %s
 
-如果上下文中没有答案，请说不知道。`, conText, query)
+如果上下文中没有答案，请明确说不知道。`, conText, query)
 
-	// 调试：打印完整 prompt
-	debugLog("RAG Prompt: %s", prompt)
+	// 调试：打印完整 promptWord
+	debugLog("RAG Prompt: %s", promptWord)
 
-	// 添加用户消息
-	cb.messages = append(cb.messages, schema.UserMessage(prompt))
+	// 保存当前消息历史长度（避免污染）
+	prevMessageCount := len(cb.messages)
+
+	// 添加临时 RAG promptWord（不污染长期历史）
+	cb.messages = append(cb.messages, schema.UserMessage(promptWord))
 
 	// 获取流式回复
 	reader, err := cb.model.Stream(cb.ctx, cb.messages, opts...)
@@ -516,17 +610,24 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 			return fmt.Errorf("接收流式数据失败: %w", err)
 		}
 
+		// 合并消息碎片
 		if fullMessage == nil {
 			fullMessage = chunk
 		} else {
 			fullMessage, _ = schema.ConcatMessages([]*schema.Message{fullMessage, chunk})
 		}
 
+		// 实时输出
 		if chunk.Content != "" {
 			fmt.Print(chunk.Content)
 		}
 	}
 
+	// 恢复消息历史（移除临时 RAG promptWord）
+	cb.messages = cb.messages[:prevMessageCount]
+
+	// 只添加用户原问题和最终回答到历史
+	cb.messages = append(cb.messages, schema.UserMessage(query))
 	if fullMessage != nil {
 		cb.messages = append(cb.messages, fullMessage)
 	}
