@@ -1,2 +1,5 @@
 /milvus/
 *.json
+/data/
+/knowledge/
+

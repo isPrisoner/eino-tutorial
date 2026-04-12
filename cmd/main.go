@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/volcengine/volcengine-go-sdk/service/arkruntime"
 	arkruntimeModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 
+	"eino-tutorial/internal/fileimport"
 	"eino-tutorial/internal/textsplitter"
 	"eino-tutorial/internal/vectorstore"
 	milvusStore "eino-tutorial/internal/vectorstore/milvus"
@@ -279,6 +281,158 @@ func (cb *ChatBot) AddDocument(id, content string) error {
 	return nil
 }
 
+// AddFile 导入单个文件
+func (cb *ChatBot) AddFile(filePath string) (*fileimport.FileImportResult, error) {
+	result := &fileimport.FileImportResult{
+		Success: false,
+	}
+
+	// 调试：打印工作目录和文件路径
+	wd, _ := os.Getwd()
+	debugLog("当前工作目录: %s", wd)
+	debugLog("尝试访问文件: %s", filePath)
+
+	// 1. 检查文件是否存在
+	if _, err := os.Stat(filePath); err != nil {
+		result.Error = fmt.Errorf("文件不存在: %w", err)
+		return result, result.Error
+	}
+
+	// 2. 检查文件扩展名
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext != ".txt" && ext != ".md" {
+		result.Error = fmt.Errorf("不支持的文件类型: %s（仅支持 .txt 和 .md）", ext)
+		return result, result.Error
+	}
+
+	// 3. 读取文件内容
+	content, err := fileimport.ReadFileContent(filePath)
+	if err != nil {
+		result.Error = fmt.Errorf("读取文件失败: %w", err)
+		return result, result.Error
+	}
+
+	// 4. 获取相对路径作为 doc_id
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		result.Error = fmt.Errorf("获取绝对路径失败: %w", err)
+		return result, result.Error
+	}
+
+	docID, err := fileimport.GetRelativePath(absPath)
+	if err != nil {
+		result.Error = fmt.Errorf("计算相对路径失败: %w", err)
+		return result, result.Error
+	}
+
+	// 5. 获取文件名
+	filename := filepath.Base(filePath)
+
+	// 6. 构建增强的元数据
+	metadata := map[string]string{
+		"filename":        filename,
+		"filepath":        absPath,
+		"original_length": strconv.Itoa(len(content)),
+		"file_type":       strings.TrimPrefix(ext, "."),
+	}
+
+	// 7. 文本切分
+	chunks := cb.textsplitter.Split(content)
+	if len(chunks) == 0 {
+		result.Error = fmt.Errorf("文本切分后没有有效分块")
+		return result, result.Error
+	}
+
+	// 8. 批量生成向量
+	embeddings, err := cb.embedder.EmbedStrings(cb.ctx, chunks)
+	if err != nil {
+		result.Error = fmt.Errorf("生成文档向量失败: %w", err)
+		return result, result.Error
+	}
+
+	// 9. 构建文档列表
+	docs := make([]*vectorstore.Document, 0, len(chunks))
+	for i, chunk := range chunks {
+		doc := &vectorstore.Document{
+			ID:         uuid.New().String(),
+			Content:    chunk,
+			Vector:     embeddings[i],
+			DocID:      docID,
+			ChunkIndex: int64(i),
+			Source:     absPath,
+			Metadata:   metadata,
+		}
+		docs = append(docs, doc)
+	}
+
+	// 10. 批量插入 Milvus
+	if err := cb.vectorstore.InsertDocuments(cb.ctx, docs); err != nil {
+		result.Error = fmt.Errorf("插入向量存储失败: %w", err)
+		return result, result.Error
+	}
+
+	result.DocID = docID
+	result.ChunkCount = len(chunks)
+	result.Success = true
+
+	debugLog("成功添加文件: %s, 切分为 %d 个分块", docID, len(chunks))
+	return result, nil
+}
+
+// AddDir 批量导入目录中的文件
+func (cb *ChatBot) AddDir(dirPath string) error {
+	// 1. 检查目录是否存在
+	if _, err := os.Stat(dirPath); err != nil {
+		return fmt.Errorf("目录不存在: %w", err)
+	}
+
+	// 2. 扫描目录
+	files, err := fileimport.ScanDirectory(dirPath)
+	if err != nil {
+		return fmt.Errorf("扫描目录失败: %w", err)
+	}
+
+	if len(files) == 0 {
+		fmt.Printf("目录中没有找到 .txt 或 .md 文件\n")
+		return nil
+	}
+
+	debugLog("找到 %d 个文件待导入", len(files))
+
+	// 3. 批量导入
+	successCount := 0
+	failCount := 0
+	totalChunks := 0
+	var failedFiles []string
+
+	for _, file := range files {
+		debugLog("处理文件: %s", file)
+
+		result, err := cb.AddFile(file)
+		if err != nil || !result.Success {
+			debugLog("文件导入失败: %s, 错误: %v", file, err)
+			failCount++
+			failedFiles = append(failedFiles, file)
+		} else {
+			successCount++
+			totalChunks += result.ChunkCount
+		}
+	}
+
+	// 4. 输出结果
+	fmt.Printf("成功导入 %d 个文件，共 %d 个分块\n", successCount, totalChunks)
+	if failCount > 0 {
+		fmt.Printf("失败 %d 个文件\n", failCount)
+		if debugMode {
+			for _, file := range failedFiles {
+				fmt.Printf("  - %s\n", file)
+			}
+		}
+	}
+
+	return nil
+}
+
 // SearchDocuments 搜索相关文档
 func (cb *ChatBot) SearchDocuments(query string, topK int) ([]*vectorstore.Document, error) {
 	if cb.embedder == nil {
@@ -522,10 +676,14 @@ func main() {
 	fmt.Println("  /code <需求> <语言>               - 代码生成")
 	fmt.Println("  /summarize <内容> <风格> <长度>    - 内容总结")
 	fmt.Println("  /add <文档内容>                   - 添加文档到知识库")
+	fmt.Println("  /add_file <文件路径>              - 导入单个文件（支持 .txt 和 .md）")
+	fmt.Println("  /add_dir <目录路径>               - 批量导入目录中的文件")
 	fmt.Println("  /rag <问题>                       - 使用 RAG 回答问题")
 	fmt.Println("  其他输入                           - 普通对话")
 	fmt.Println("  exit                              - 退出")
 	fmt.Println("=====================================")
+	fmt.Println("提示：带空格的路径请使用引号，例如：/add_file \"./data/my file.txt\"")
+	fmt.Println("注意：重复导入会创建新的向量记录，由检索层通过相似度去重")
 
 	docCounter := 0
 	for {
@@ -600,10 +758,37 @@ func main() {
 						log.Printf("添加文档失败: %v", err)
 						docCounter-- // 失败则回退计数
 					} else {
-						debugLog("成功添加文档: %s", docID)
+						fmt.Printf("成功添加文档: %s\n", docID)
+						debugLog("文档内容: %s", content)
 					}
 				} else {
 					fmt.Println("用法: /add <文档内容>")
+				}
+
+			case "/add_file":
+				if len(parts) > 1 {
+					filePath := strings.Join(parts[1:], " ")
+					result, err := chatBot.AddFile(filePath)
+					if err != nil {
+						log.Printf("文件导入失败: %v", err)
+					} else if result.Success {
+						fmt.Printf("成功导入文件: %s (%d 个分块)\n", result.DocID, result.ChunkCount)
+					}
+				} else {
+					fmt.Println("用法: /add_file <文件路径>")
+					fmt.Println("注意：带空格的路径请使用引号，例如：/add_file \"./data/my file.txt\"")
+				}
+
+			case "/add_dir":
+				if len(parts) > 1 {
+					dirPath := strings.Join(parts[1:], " ")
+					err := chatBot.AddDir(dirPath)
+					if err != nil {
+						log.Printf("目录导入失败: %v", err)
+					}
+				} else {
+					fmt.Println("用法: /add_dir <目录路径>")
+					fmt.Println("注意：带空格的路径请使用引号，例如：/add_dir \"./my data/\"")
 				}
 
 			case "/rag":
