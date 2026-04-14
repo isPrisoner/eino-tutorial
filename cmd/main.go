@@ -13,6 +13,7 @@ import (
 
 	"eino-tutorial/internal/chat"
 	"eino-tutorial/internal/cli"
+	"eino-tutorial/internal/ingest"
 	"eino-tutorial/internal/textsplitter"
 	"eino-tutorial/internal/utils"
 	"eino-tutorial/internal/vectorstore"
@@ -126,19 +127,25 @@ func main() {
 		splitter = nil
 	}
 
-	// 5. 读取 RAG 配置
+	// 5. 创建 ingest 服务
+	var ingestService *ingest.Service
+	if vs != nil && splitter != nil {
+		ingestService = ingest.NewService(ctx, embedder, vs, splitter)
+	}
+
+	// 6. 读取 RAG 配置
 	ragMinScore := getEnvFloat("RAG_MIN_SCORE", 0.5)
 	ragTopK := getEnvInt("RAG_TOPK", 5)
 	ragMaxContextLen := getEnvInt("RAG_MAX_CONTEXT_LEN", 2000)
 	ragMaxContextChunks := getEnvInt("RAG_MAX_CONTEXT_CHUNKS", 10)
 
-	// 6. 创建 ChatBot
-	chatBot := chat.NewChatBot(ctx, chatModel, embedder, vs, splitter, ragMinScore, ragTopK, ragMaxContextLen, ragMaxContextChunks)
+	// 7. 创建 ChatBot
+	chatBot := chat.NewChatBot(ctx, chatModel, embedder, vs, ragMinScore, ragTopK, ragMaxContextLen, ragMaxContextChunks)
 
-	// 7. 创建 CLI 处理器
-	handler := cli.NewHandler(chatBot)
+	// 8. 创建 CLI 处理器
+	handler := cli.NewHandler(chatBot, ingestService)
 
-	// 8. 启动 CLI
+	// 9. 启动 CLI
 	if err := handler.Run(); err != nil {
 		log.Fatalf("CLI 运行失败: %v", err)
 	}

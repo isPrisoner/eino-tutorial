@@ -62,6 +62,11 @@ func handleSummarize(h *Handler, parts []string) error {
 
 // handleAdd 处理添加文档命令
 func handleAdd(h *Handler, parts []string) error {
+	if h.ingestService == nil {
+		fmt.Println("知识库入库功能未启用，无法添加文档。请检查 EMBEDDER、ARK_EMBEDDER_API_KEY、MILVUS_ADDRESS 等配置。")
+		return nil
+	}
+
 	if len(parts) <= 1 {
 		fmt.Println("用法: /add <文档内容>")
 		return nil
@@ -70,7 +75,7 @@ func handleAdd(h *Handler, parts []string) error {
 	content := strings.Join(parts[1:], " ")
 	h.docCounter++
 	docID := fmt.Sprintf("doc_%d", h.docCounter)
-	err := h.chatBot.AddDocument(docID, content)
+	err := h.ingestService.AddDocument(docID, content)
 	if err != nil {
 		log.Printf("添加文档失败: %v", err)
 		h.docCounter-- // 失败则回退计数
@@ -83,6 +88,11 @@ func handleAdd(h *Handler, parts []string) error {
 
 // handleAddFile 处理添加文件命令
 func handleAddFile(h *Handler, parts []string) error {
+	if h.ingestService == nil {
+		fmt.Println("知识库入库功能未启用，无法添加文档。请检查 EMBEDDER、ARK_EMBEDDER_API_KEY、MILVUS_ADDRESS 等配置。")
+		return nil
+	}
+
 	if len(parts) <= 1 {
 		fmt.Println("用法: /add_file <文件路径>")
 		fmt.Println("注意：带空格的路径请使用引号，例如：/add_file \"./data/my file.txt\"")
@@ -90,7 +100,7 @@ func handleAddFile(h *Handler, parts []string) error {
 	}
 
 	filePath := strings.Join(parts[1:], " ")
-	result, err := h.chatBot.AddFile(filePath)
+	result, err := h.ingestService.AddFile(filePath)
 	if err != nil {
 		log.Printf("文件导入失败: %v", err)
 		return fmt.Errorf("文件导入失败: %w", err)
@@ -103,6 +113,11 @@ func handleAddFile(h *Handler, parts []string) error {
 
 // handleAddDir 处理添加目录命令
 func handleAddDir(h *Handler, parts []string) error {
+	if h.ingestService == nil {
+		fmt.Println("知识库入库功能未启用，无法添加文档。请检查 EMBEDDER、ARK_EMBEDDER_API_KEY、MILVUS_ADDRESS 等配置。")
+		return nil
+	}
+
 	if len(parts) <= 1 {
 		fmt.Println("用法: /add_dir <目录路径>")
 		fmt.Println("注意：带空格的路径请使用引号，例如：/add_dir \"./my data/\"")
@@ -110,7 +125,7 @@ func handleAddDir(h *Handler, parts []string) error {
 	}
 
 	dirPath := strings.Join(parts[1:], " ")
-	err := h.chatBot.AddDir(dirPath)
+	err := h.ingestService.AddDir(dirPath)
 	if err != nil {
 		log.Printf("目录导入失败: %v", err)
 		return fmt.Errorf("目录导入失败: %w", err)

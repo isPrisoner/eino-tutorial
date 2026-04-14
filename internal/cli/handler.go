@@ -7,21 +7,24 @@ import (
 	"strings"
 
 	"eino-tutorial/internal/chat"
+	"eino-tutorial/internal/ingest"
 )
 
 // Handler CLI 命令处理器
 type Handler struct {
-	chatBot    *chat.ChatBot
-	scanner    *bufio.Scanner
-	docCounter int
+	chatBot       *chat.ChatBot
+	ingestService *ingest.Service
+	scanner       *bufio.Scanner
+	docCounter    int
 }
 
 // NewHandler 创建 CLI 处理器
-func NewHandler(chatBot *chat.ChatBot) *Handler {
+func NewHandler(chatBot *chat.ChatBot, ingestService *ingest.Service) *Handler {
 	return &Handler{
-		chatBot:    chatBot,
-		scanner:    bufio.NewScanner(os.Stdin),
-		docCounter: 0,
+		chatBot:       chatBot,
+		ingestService: ingestService,
+		scanner:       bufio.NewScanner(os.Stdin),
+		docCounter:    0,
 	}
 }
 
