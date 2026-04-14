@@ -13,6 +13,7 @@ import (
 	"github.com/volcengine/volcengine-go-sdk/service/arkruntime"
 	arkruntimeModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 
+	"eino-tutorial/internal/retrieval"
 	"eino-tutorial/internal/utils"
 	"eino-tutorial/internal/vectorstore"
 )
@@ -23,8 +24,7 @@ type ChatBot struct {
 	ctx                 context.Context
 	messages            []*schema.Message
 	templates           map[string]prompt.ChatTemplate
-	embedder            embedding.Embedder
-	vectorstore         vectorstore.VectorStore
+	retrievalService    *retrieval.Service
 	ragMinScore         float64
 	ragTopK             int
 	ragMaxContextLen    int
@@ -83,7 +83,7 @@ func (ve *VolcengineEmbedder) EmbedStrings(ctx context.Context, texts []string, 
 }
 
 // NewChatBot 创建新的聊天机器人实例
-func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, embedder embedding.Embedder, vs vectorstore.VectorStore, ragMinScore float64, ragTopK int, ragMaxContextLen int, ragMaxContextChunks int) *ChatBot {
+func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, retrievalService *retrieval.Service, ragMinScore float64, ragTopK int, ragMaxContextLen int, ragMaxContextChunks int) *ChatBot {
 	bot := &ChatBot{
 		model: chatModel,
 		ctx:   ctx,
@@ -91,8 +91,7 @@ func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, embedder emb
 			schema.SystemMessage("你是一个友好的 AI 助手"),
 		},
 		templates:           make(map[string]prompt.ChatTemplate),
-		embedder:            embedder,
-		vectorstore:         vs,
+		retrievalService:    retrievalService,
 		ragMinScore:         ragMinScore,
 		ragTopK:             ragTopK,
 		ragMaxContextLen:    ragMaxContextLen,
@@ -221,36 +220,16 @@ func (cb *ChatBot) Summarize(content, style string, maxLength int) error {
 	return cb.UseTemplate("summarize", params)
 }
 
-// SearchDocuments 搜索相关文档
-func (cb *ChatBot) SearchDocuments(query string, topK int) ([]*vectorstore.Document, error) {
-	if cb.embedder == nil {
-		return nil, fmt.Errorf("嵌入器未初始化")
-	}
-	if cb.vectorstore == nil {
-		return nil, fmt.Errorf("向量存储未初始化")
-	}
-
-	// 生成查询向量
-	embeddings, err := cb.embedder.EmbedStrings(cb.ctx, []string{query})
-	if err != nil {
-		return nil, fmt.Errorf("生成查询向量失败: %w", err)
-	}
-
-	queryEmbedding := embeddings[0]
-
-	// 使用 Milvus 搜索
-	docs, err := cb.vectorstore.Search(cb.ctx, queryEmbedding, topK)
-	if err != nil {
-		return nil, fmt.Errorf("搜索失败: %w", err)
-	}
-
-	return docs, nil
-}
-
 // ChatWithRAG 使用 RAG 进行对话
 func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
+	// 检查检索服务是否可用
+	if cb.retrievalService == nil {
+		fmt.Println("AI (RAG): 知识库检索功能未启用，无法使用 RAG。请检查 EMBEDDER、ARK_EMBEDDER_API_KEY、MILVUS_ADDRESS 等配置。")
+		return nil
+	}
+
 	// 搜索相关文档
-	docs, err := cb.SearchDocuments(query, cb.ragTopK)
+	docs, err := cb.retrievalService.SearchDocuments(query, cb.ragTopK)
 	if err != nil {
 		return fmt.Errorf("搜索文档失败: %w", err)
 	}

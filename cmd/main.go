@@ -14,6 +14,7 @@ import (
 	"eino-tutorial/internal/chat"
 	"eino-tutorial/internal/cli"
 	"eino-tutorial/internal/ingest"
+	"eino-tutorial/internal/retrieval"
 	"eino-tutorial/internal/textsplitter"
 	"eino-tutorial/internal/utils"
 	"eino-tutorial/internal/vectorstore"
@@ -133,6 +134,12 @@ func main() {
 		ingestService = ingest.NewService(ctx, embedder, vs, splitter)
 	}
 
+	// 5.5 创建 retrieval 服务
+	var retrievalService *retrieval.Service
+	if embedder != nil && vs != nil {
+		retrievalService = retrieval.NewService(ctx, embedder, vs)
+	}
+
 	// 6. 读取 RAG 配置
 	ragMinScore := getEnvFloat("RAG_MIN_SCORE", 0.5)
 	ragTopK := getEnvInt("RAG_TOPK", 5)
@@ -140,7 +147,7 @@ func main() {
 	ragMaxContextChunks := getEnvInt("RAG_MAX_CONTEXT_CHUNKS", 10)
 
 	// 7. 创建 ChatBot
-	chatBot := chat.NewChatBot(ctx, chatModel, embedder, vs, ragMinScore, ragTopK, ragMaxContextLen, ragMaxContextChunks)
+	chatBot := chat.NewChatBot(ctx, chatModel, retrievalService, ragMinScore, ragTopK, ragMaxContextLen, ragMaxContextChunks)
 
 	// 8. 创建 CLI 处理器
 	handler := cli.NewHandler(chatBot, ingestService)
