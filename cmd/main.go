@@ -17,7 +17,6 @@ import (
 	"eino-tutorial/internal/retrieval"
 	"eino-tutorial/internal/textsplitter"
 	"eino-tutorial/internal/utils"
-	"eino-tutorial/internal/vectorstore"
 	milvusStore "eino-tutorial/internal/vectorstore/milvus"
 )
 
@@ -72,7 +71,7 @@ func main() {
 	}
 
 	// 3. 创建 Milvus 向量存储
-	var vs vectorstore.VectorStore
+	var store *milvusStore.MilvusStore
 	if embedder != nil {
 		milvusAddress := os.Getenv("MILVUS_ADDRESS")
 		if milvusAddress == "" {
@@ -93,21 +92,21 @@ func main() {
 			}
 		}
 
-		store, err := milvusStore.NewMilvusStore(ctx, milvusAddress, milvusDim, milvusTopK)
+		var err error
+		store, err = milvusStore.NewMilvusStore(ctx, milvusAddress, milvusDim, milvusTopK)
 		if err != nil {
 			log.Printf("创建 Milvus 存储失败: %v (RAG功能将不可用)", err)
-			vs = nil
+			store = nil
 		} else {
-			vs = store
 			utils.DebugLog("Milvus 向量存储已启用 (address=%s, dim=%d, topK=%d)", milvusAddress, milvusDim, milvusTopK)
 		}
 	} else {
-		vs = nil
+		store = nil
 	}
 
 	// 4. 创建文本切分器
 	var splitter *textsplitter.TextSplitter
-	if vs != nil {
+	if store != nil {
 		chunkSize := 500
 		if sizeStr := os.Getenv("CHUNK_SIZE"); sizeStr != "" {
 			if s, err := strconv.Atoi(sizeStr); err == nil {
@@ -130,14 +129,14 @@ func main() {
 
 	// 5. 创建 ingest 服务
 	var ingestService *ingest.Service
-	if vs != nil && splitter != nil {
-		ingestService = ingest.NewService(ctx, embedder, vs, splitter)
+	if store != nil && splitter != nil {
+		ingestService = ingest.NewService(ctx, embedder, store, splitter)
 	}
 
 	// 5.5 创建 retrieval 服务
 	var retrievalService *retrieval.Service
-	if embedder != nil && vs != nil {
-		retrievalService = retrieval.NewService(ctx, embedder, vs)
+	if embedder != nil && store != nil {
+		retrievalService = retrieval.NewService(ctx, embedder, store)
 	}
 
 	// 6. 读取 RAG 配置

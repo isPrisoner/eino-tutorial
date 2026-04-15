@@ -8,30 +8,29 @@ import (
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/schema"
 
-	"eino-tutorial/internal/docconv"
 	"eino-tutorial/internal/vectorstore"
 )
 
 // Service 文档检索服务
 type Service struct {
-	ctx         context.Context
-	embedder    embedding.Embedder
-	vectorstore vectorstore.VectorStore
+	ctx          context.Context
+	embedder     embedding.Embedder
+	schemaReader vectorstore.SchemaDocumentReader
 	// 注意：ctx 作为字段是阶段性设计，后续标准化时应改为由方法显式传入 ctx
 }
 
 // NewService 创建文档检索服务
-func NewService(ctx context.Context, embedder embedding.Embedder, vs vectorstore.VectorStore) *Service {
+func NewService(ctx context.Context, embedder embedding.Embedder, reader vectorstore.SchemaDocumentReader) *Service {
 	return &Service{
-		ctx:         ctx,
-		embedder:    embedder,
-		vectorstore: vs,
+		ctx:          ctx,
+		embedder:     embedder,
+		schemaReader: reader,
 	}
 }
 
 // Retrieve 实现 Eino Retriever 接口，检索文档
 func (s *Service) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
-	if s.vectorstore == nil {
+	if s.schemaReader == nil {
 		return nil, fmt.Errorf("向量存储未初始化")
 	}
 
@@ -63,18 +62,25 @@ func (s *Service) Retrieve(ctx context.Context, query string, opts ...retriever.
 	}
 
 	queryEmbedding := embeddings[0]
+	queryVec := float64ToFloat32(queryEmbedding)
 
-	// 使用 Milvus 搜索
-	customDocs, err := s.vectorstore.Search(ctx, queryEmbedding, topK)
+	// 直接调用 SearchSchemaDocuments
+	schemaDocs, err := s.schemaReader.SearchSchemaDocuments(ctx, queryVec, topK)
 	if err != nil {
 		return nil, fmt.Errorf("搜索失败: %w", err)
 	}
 
-	// 转换为 schema.Document
-	schemaDocs := make([]*schema.Document, 0, len(customDocs))
-	for _, doc := range customDocs {
-		schemaDocs = append(schemaDocs, docconv.CustomToSchema(doc))
-	}
-
 	return schemaDocs, nil
+}
+
+// float64ToFloat32 将 float64 切片转换为 float32 切片
+func float64ToFloat32(vec []float64) []float32 {
+	if vec == nil {
+		return nil
+	}
+	result := make([]float32, len(vec))
+	for i, v := range vec {
+		result[i] = float32(v)
+	}
+	return result
 }

@@ -6,9 +6,8 @@ import (
 	"log"
 	"os"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
-
-	"eino-tutorial/internal/vectorstore"
 )
 
 var debugMode = os.Getenv("DEBUG") == "true"
@@ -56,45 +55,49 @@ func NewMilvusStore(ctx context.Context, address string, dim, topK int) (*Milvus
 	}, nil
 }
 
-// InsertDocuments 批量插入文档向量（桥接到 repository）
-func (ms *MilvusStore) InsertDocuments(ctx context.Context, docs []*vectorstore.Document) error {
+// Close 关闭连接
+func (ms *MilvusStore) Close() error {
+	return ms.repository.Close()
+}
+
+// InsertSchemaDocuments 批量插入 schema.Document（直接处理标准文档）
+func (ms *MilvusStore) InsertSchemaDocuments(ctx context.Context, docs []*schema.Document) ([]string, error) {
 	if len(docs) == 0 {
-		return nil
+		return []string{}, nil
 	}
 
 	// 转换为 MilvusRow
 	rows := make([]*MilvusRow, 0, len(docs))
+	ids := make([]string, 0, len(docs))
 	for _, doc := range docs {
-		row, err := DocumentToRow(doc)
+		row, err := SchemaToRow(doc)
 		if err != nil {
-			return fmt.Errorf("文档转换失败: %w", err)
+			return nil, fmt.Errorf("文档转换失败: %w", err)
 		}
 		rows = append(rows, row)
+		ids = append(ids, row.ID)
 	}
 
 	// 调用 repository 插入
 	if err := ms.repository.InsertRows(ctx, rows); err != nil {
-		return fmt.Errorf("插入文档失败: %w", err)
+		return nil, fmt.Errorf("插入文档失败: %w", err)
 	}
 
-	return nil
+	return ids, nil
 }
 
-// Search 搜索相似文档（桥接到 repository）
-func (ms *MilvusStore) Search(ctx context.Context, queryEmbedding []float64, topK int) ([]*vectorstore.Document, error) {
-	// 转换查询向量
-	queryVec := float64ToFloat32(queryEmbedding)
-
+// SearchSchemaDocuments 搜索返回 schema.Document（直接处理标准文档）
+func (ms *MilvusStore) SearchSchemaDocuments(ctx context.Context, queryVec []float32, topK int) ([]*schema.Document, error) {
 	// 调用 repository 搜索
 	rows, err := ms.repository.SearchRows(ctx, queryVec, topK)
 	if err != nil {
 		return nil, fmt.Errorf("搜索文档失败: %w", err)
 	}
 
-	// 转换为 vectorstore.Document
-	docs := make([]*vectorstore.Document, 0, len(rows))
+	// 转换为 schema.Document
+	docs := make([]*schema.Document, 0, len(rows))
 	for _, row := range rows {
-		doc, err := RowToDocument(row)
+		doc, err := RowToSchema(row)
 		if err != nil {
 			return nil, fmt.Errorf("文档转换失败: %w", err)
 		}
@@ -102,9 +105,4 @@ func (ms *MilvusStore) Search(ctx context.Context, queryEmbedding []float64, top
 	}
 
 	return docs, nil
-}
-
-// Close 关闭连接（桥接到 repository）
-func (ms *MilvusStore) Close() error {
-	return ms.repository.Close()
 }

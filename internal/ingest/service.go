@@ -24,17 +24,17 @@ import (
 type Service struct {
 	ctx          context.Context
 	embedder     embedding.Embedder
-	vectorstore  vectorstore.VectorStore
+	schemaWriter vectorstore.SchemaDocumentWriter
 	textsplitter *textsplitter.TextSplitter
 	// 注意：ctx 作为字段是阶段性设计，后续标准化时应改为由方法显式传入 ctx
 }
 
 // NewService 创建文档入库服务
-func NewService(ctx context.Context, embedder embedding.Embedder, vs vectorstore.VectorStore, ts *textsplitter.TextSplitter) *Service {
+func NewService(ctx context.Context, embedder embedding.Embedder, writer vectorstore.SchemaDocumentWriter, ts *textsplitter.TextSplitter) *Service {
 	return &Service{
 		ctx:          ctx,
 		embedder:     embedder,
-		vectorstore:  vs,
+		schemaWriter: writer,
 		textsplitter: ts,
 	}
 }
@@ -200,7 +200,7 @@ func (s *Service) ImportDir(dirPath string) (successCount int, totalChunks int, 
 
 // Store 实现 Eino Indexer 接口，存储文档
 func (s *Service) Store(ctx context.Context, docs []*schema.Document, opts ...indexer.Option) (ids []string, err error) {
-	if s.vectorstore == nil {
+	if s.schemaWriter == nil {
 		return nil, fmt.Errorf("向量存储未初始化")
 	}
 
@@ -217,31 +217,21 @@ func (s *Service) Store(ctx context.Context, docs []*schema.Document, opts ...in
 		return nil, fmt.Errorf("嵌入器未初始化，请通过 indexer.WithEmbedding 选项传入")
 	}
 
-	// 转换为自定义 Document
-	customDocs := make([]*vectorstore.Document, 0, len(docs))
-	ids = make([]string, 0, len(docs))
-
-	for _, doc := range docs {
-		customDoc, err := docconv.SchemaToCustom(doc)
-		if err != nil {
-			return nil, fmt.Errorf("文档转换失败: %w", err)
-		}
-
-		// 如果没有向量，则生成
-		if customDoc.Vector == nil || len(customDoc.Vector) == 0 {
+	// 如果文档没有向量，则生成
+	for i, doc := range docs {
+		if doc.DenseVector() == nil || len(doc.DenseVector()) == 0 {
 			embeddings, err := embedder.EmbedStrings(ctx, []string{doc.Content})
 			if err != nil {
 				return nil, fmt.Errorf("生成向量失败: %w", err)
 			}
-			customDoc.Vector = embeddings[0]
+			// WithDenseVector 可能返回新对象，确保写回切片
+			docs[i] = doc.WithDenseVector(embeddings[0])
 		}
-
-		customDocs = append(customDocs, customDoc)
-		ids = append(ids, customDoc.ID)
 	}
 
-	// 批量插入
-	if err := s.vectorstore.InsertDocuments(ctx, customDocs); err != nil {
+	// 直接调用 InsertSchemaDocuments
+	ids, err = s.schemaWriter.InsertSchemaDocuments(ctx, docs)
+	if err != nil {
 		return nil, fmt.Errorf("插入向量存储失败: %w", err)
 	}
 
