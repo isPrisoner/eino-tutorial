@@ -75,14 +75,14 @@ func handleAdd(h *Handler, parts []string) error {
 	content := strings.Join(parts[1:], " ")
 	h.docCounter++
 	docID := fmt.Sprintf("doc_%d", h.docCounter)
-	err := h.ingestService.AddDocument(docID, content)
+	_, chunkCount, err := h.ingestService.ImportText(docID, content, "manual")
 	if err != nil {
 		log.Printf("添加文档失败: %v", err)
 		h.docCounter-- // 失败则回退计数
 		return fmt.Errorf("添加文档失败: %w", err)
 	}
 	fmt.Printf("成功添加文档: %s\n", docID)
-	utils.DebugLog("文档内容: %s", content)
+	utils.DebugLog("文档内容: %s, 分块数: %d", content, chunkCount)
 	return nil
 }
 
@@ -100,14 +100,12 @@ func handleAddFile(h *Handler, parts []string) error {
 	}
 
 	filePath := strings.Join(parts[1:], " ")
-	result, err := h.ingestService.AddFile(filePath)
+	docID, chunkCount, err := h.ingestService.ImportFile(filePath)
 	if err != nil {
 		log.Printf("文件导入失败: %v", err)
 		return fmt.Errorf("文件导入失败: %w", err)
 	}
-	if result.Success {
-		fmt.Printf("成功导入文件: %s (%d 个分块)\n", result.DocID, result.ChunkCount)
-	}
+	fmt.Printf("成功导入文件: %s (%d 个分块)\n", docID, chunkCount)
 	return nil
 }
 
@@ -125,7 +123,7 @@ func handleAddDir(h *Handler, parts []string) error {
 	}
 
 	dirPath := strings.Join(parts[1:], " ")
-	err := h.ingestService.AddDir(dirPath)
+	_, _, err := h.ingestService.ImportDir(dirPath)
 	if err != nil {
 		log.Printf("目录导入失败: %v", err)
 		return fmt.Errorf("目录导入失败: %w", err)
