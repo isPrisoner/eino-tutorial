@@ -29,27 +29,6 @@ func NewService(ctx context.Context, embedder embedding.Embedder, vs vectorstore
 	}
 }
 
-// Deprecated: Use Retrieve method instead. This method will be removed in a future version.
-func (s *Service) SearchDocuments(query string, topK int) ([]*vectorstore.Document, error) {
-	// 桥接到 Retrieve 标准接口
-	schemaDocs, err := s.Retrieve(s.ctx, query, retriever.WithTopK(topK))
-	if err != nil {
-		return nil, fmt.Errorf("检索文档失败: %w", err)
-	}
-
-	// 转换为 vectorstore.Document
-	customDocs := make([]*vectorstore.Document, 0, len(schemaDocs))
-	for _, doc := range schemaDocs {
-		customDoc, err := docconv.SchemaToCustom(doc)
-		if err != nil {
-			return nil, fmt.Errorf("文档转换失败: %w", err)
-		}
-		customDocs = append(customDocs, customDoc)
-	}
-
-	return customDocs, nil
-}
-
 // Retrieve 实现 Eino Retriever 接口，检索文档
 func (s *Service) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
 	if s.vectorstore == nil {
