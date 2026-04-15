@@ -39,7 +39,7 @@ func NewService(ctx context.Context, embedder embedding.Embedder, vs vectorstore
 	}
 }
 
-// AddDocument 添加文档到知识库
+// Deprecated: Use Store method instead. This method will be removed in a future version.
 func (s *Service) AddDocument(id, content string) error {
 	if s.textsplitter == nil {
 		return fmt.Errorf("文本切分器未初始化")
@@ -124,7 +124,7 @@ func (s *Service) Store(ctx context.Context, docs []*schema.Document, opts ...in
 	return ids, nil
 }
 
-// AddFile 导入单个文件
+// Deprecated: Use Store method instead. This method will be removed in a future version.
 func (s *Service) AddFile(filePath string) (*fileimport.FileImportResult, error) {
 	result := &fileimport.FileImportResult{
 		Success: false,
@@ -204,7 +204,7 @@ func (s *Service) AddFile(filePath string) (*fileimport.FileImportResult, error)
 	return result, nil
 }
 
-// AddDir 批量导入目录中的文件
+// Deprecated: Use Store method instead. This method will be removed in a future version.
 func (s *Service) AddDir(dirPath string) error {
 	// 1. 检查目录是否存在
 	if _, err := os.Stat(dirPath); err != nil {

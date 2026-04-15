@@ -29,7 +29,7 @@ func NewService(ctx context.Context, embedder embedding.Embedder, vs vectorstore
 	}
 }
 
-// SearchDocuments 搜索相关文档
+// Deprecated: Use Retrieve method instead. This method will be removed in a future version.
 func (s *Service) SearchDocuments(query string, topK int) ([]*vectorstore.Document, error) {
 	// 桥接到 Retrieve 标准接口
 	schemaDocs, err := s.Retrieve(s.ctx, query, retriever.WithTopK(topK))

@@ -220,6 +220,31 @@ func (cb *ChatBot) Summarize(content, style string, maxLength int) error {
 	return cb.UseTemplate("summarize", params)
 }
 
+// getDocID 获取文档 ID
+func (cb *ChatBot) getDocID(doc *vectorstore.Document) string {
+	return doc.DocID
+}
+
+// getChunkIndex 获取分块索引
+func (cb *ChatBot) getChunkIndex(doc *vectorstore.Document) int64 {
+	return doc.ChunkIndex
+}
+
+// getScore 获取相似度分数
+func (cb *ChatBot) getScore(doc *vectorstore.Document) float64 {
+	return doc.Score
+}
+
+// getContent 获取文档内容
+func (cb *ChatBot) getContent(doc *vectorstore.Document) string {
+	return doc.Content
+}
+
+// getDocDedupKey 生成文档去重 key
+func (cb *ChatBot) getDocDedupKey(doc *vectorstore.Document) string {
+	return fmt.Sprintf("%s:%d", cb.getDocID(doc), cb.getChunkIndex(doc))
+}
+
 // ChatWithRAG 使用 RAG 进行对话
 func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	// 检查检索服务是否可用
@@ -237,13 +262,13 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	// 调试：打印检索结果
 	utils.DebugLog("检索结果数量: %d", len(docs))
 	for i, doc := range docs {
-		utils.DebugLog("检索结果[%d]: doc_id=%s, chunk_index=%d, score=%.4f", i, doc.DocID, doc.ChunkIndex, doc.Score)
+		utils.DebugLog("检索结果[%d]: doc_id=%s, chunk_index=%d, score=%.4f", i, cb.getDocID(doc), cb.getChunkIndex(doc), cb.getScore(doc))
 	}
 
 	// 1. 分数阈值过滤
 	var filteredDocs []*vectorstore.Document
 	for _, doc := range docs {
-		if doc.Score >= cb.ragMinScore {
+		if cb.getScore(doc) >= cb.ragMinScore {
 			filteredDocs = append(filteredDocs, doc)
 		}
 	}
@@ -258,9 +283,9 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	// 3. 第一层去重：按 doc_id + chunk_index
 	uniqueDocs := make(map[string]*vectorstore.Document) // key: doc_id:chunk_index
 	for _, doc := range filteredDocs {
-		key := fmt.Sprintf("%s:%d", doc.DocID, doc.ChunkIndex)
+		key := cb.getDocDedupKey(doc)
 		existing, exists := uniqueDocs[key]
-		if !exists || doc.Score > existing.Score {
+		if !exists || cb.getScore(doc) > cb.getScore(existing) {
 			uniqueDocs[key] = doc
 		}
 	}
@@ -269,8 +294,8 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	seenContent := make(map[string]bool)
 	var dedupedDocs []*vectorstore.Document
 	for _, doc := range uniqueDocs {
-		if !seenContent[doc.Content] {
-			seenContent[doc.Content] = true
+		if !seenContent[cb.getContent(doc)] {
+			seenContent[cb.getContent(doc)] = true
 			dedupedDocs = append(dedupedDocs, doc)
 		}
 	}
@@ -278,7 +303,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 
 	// 5. 按分数降序排序
 	sort.Slice(dedupedDocs, func(i, j int) bool {
-		return dedupedDocs[i].Score > dedupedDocs[j].Score
+		return cb.getScore(dedupedDocs[i]) > cb.getScore(dedupedDocs[j])
 	})
 
 	// 6. 构建上下文（限制长度和 chunk 数）
@@ -286,7 +311,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	totalLen := 0
 	chunkCount := 0
 	for _, doc := range dedupedDocs {
-		content := doc.Content + "\n"
+		content := cb.getContent(doc) + "\n"
 
 		// 检查 chunk 数限制
 		if chunkCount >= cb.ragMaxContextChunks {

@@ -2,7 +2,8 @@ package vectorstore
 
 import "context"
 
-// VectorStore 向量存储接口
+// Deprecated: Use github.com/cloudwego/eino/components/indexer.Indexer and retriever.Retriever instead.
+// This interface will be removed in a future version.
 type VectorStore interface {
 	// InsertDocuments 批量插入文档向量
 	InsertDocuments(ctx context.Context, docs []*Document) error
@@ -14,6 +15,8 @@ type VectorStore interface {
 	Close() error
 }
 
+// Deprecated: Use github.com/cloudwego/eino/schema.Document instead.
+// This struct will be removed in a future version.
 // Document 文档结构
 type Document struct {
 	ID         string            // 主键
