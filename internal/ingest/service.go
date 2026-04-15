@@ -41,12 +41,6 @@ func NewService(ctx context.Context, embedder embedding.Embedder, vs vectorstore
 
 // AddDocument 添加文档到知识库
 func (s *Service) AddDocument(id, content string) error {
-	if s.embedder == nil {
-		return fmt.Errorf("嵌入器未初始化")
-	}
-	if s.vectorstore == nil {
-		return fmt.Errorf("向量存储未初始化")
-	}
 	if s.textsplitter == nil {
 		return fmt.Errorf("文本切分器未初始化")
 	}
@@ -57,30 +51,23 @@ func (s *Service) AddDocument(id, content string) error {
 		return fmt.Errorf("文本切分后没有有效分块")
 	}
 
-	// 2. 批量生成向量
-	embeddings, err := s.embedder.EmbedStrings(s.ctx, chunks)
-	if err != nil {
-		return fmt.Errorf("生成文档向量失败: %w", err)
-	}
-
-	// 3. 构建文档列表
-	docs := make([]*vectorstore.Document, 0, len(chunks))
+	// 2. 为每个 chunk 构建 schema.Document
+	schemaDocs := make([]*schema.Document, 0, len(chunks))
 	for i, chunk := range chunks {
-		doc := &vectorstore.Document{
-			ID:         uuid.New().String(),
-			Content:    chunk,
-			Vector:     embeddings[i],
-			DocID:      id,
-			ChunkIndex: int64(i),
-			Source:     "manual",
-			Metadata:   map[string]string{"original_length": strconv.Itoa(len(content))},
+		metadata := map[string]any{
+			"doc_id":          id,
+			"chunk_index":     int64(i),
+			"source":          "manual",
+			"original_length": strconv.Itoa(len(content)),
 		}
-		docs = append(docs, doc)
+		schemaDoc := docconv.BuildSchemaDocument(uuid.New().String(), chunk, metadata)
+		schemaDocs = append(schemaDocs, schemaDoc)
 	}
 
-	// 4. 批量插入 Milvus
-	if err := s.vectorstore.InsertDocuments(s.ctx, docs); err != nil {
-		return fmt.Errorf("插入向量存储失败: %w", err)
+	// 3. 调用 Store 方法（桥接到标准接口）
+	_, err := s.Store(s.ctx, schemaDocs)
+	if err != nil {
+		return fmt.Errorf("存储文档失败: %w", err)
 	}
 
 	utils.DebugLog("成功添加文档 %s，切分为 %d 个分块", id, len(chunks))
@@ -179,46 +166,33 @@ func (s *Service) AddFile(filePath string) (*fileimport.FileImportResult, error)
 	// 5. 获取文件名
 	filename := filepath.Base(filePath)
 
-	// 6. 构建增强的元数据
-	metadata := map[string]string{
-		"filename":        filename,
-		"filepath":        absPath,
-		"original_length": strconv.Itoa(len(content)),
-		"file_type":       strings.TrimPrefix(ext, "."),
-	}
-
-	// 7. 文本切分
+	// 6. 文本切分
 	chunks := s.textsplitter.Split(content)
 	if len(chunks) == 0 {
 		result.Error = fmt.Errorf("文本切分后没有有效分块")
 		return result, result.Error
 	}
 
-	// 8. 批量生成向量
-	embeddings, err := s.embedder.EmbedStrings(s.ctx, chunks)
-	if err != nil {
-		result.Error = fmt.Errorf("生成文档向量失败: %w", err)
-		return result, result.Error
-	}
-
-	// 9. 构建文档列表
-	docs := make([]*vectorstore.Document, 0, len(chunks))
+	// 7. 为每个 chunk 构建 schema.Document
+	schemaDocs := make([]*schema.Document, 0, len(chunks))
 	for i, chunk := range chunks {
-		doc := &vectorstore.Document{
-			ID:         uuid.New().String(),
-			Content:    chunk,
-			Vector:     embeddings[i],
-			DocID:      docID,
-			ChunkIndex: int64(i),
-			Source:     absPath,
-			Metadata:   metadata,
+		metadata := map[string]any{
+			"doc_id":          docID,
+			"chunk_index":     int64(i),
+			"source":          absPath,
+			"filename":        filename,
+			"filepath":        absPath,
+			"original_length": strconv.Itoa(len(content)),
+			"file_type":       strings.TrimPrefix(ext, "."),
 		}
-		docs = append(docs, doc)
+		schemaDoc := docconv.BuildSchemaDocument(uuid.New().String(), chunk, metadata)
+		schemaDocs = append(schemaDocs, schemaDoc)
 	}
 
-	// 10. 批量插入 Milvus
-	if err := s.vectorstore.InsertDocuments(s.ctx, docs); err != nil {
-		result.Error = fmt.Errorf("插入向量存储失败: %w", err)
+	// 8. 调用 Store 方法（桥接到标准接口）
+	_, err = s.Store(s.ctx, schemaDocs)
+	if err != nil {
+		result.Error = fmt.Errorf("存储文档失败: %w", err)
 		return result, result.Error
 	}
 
