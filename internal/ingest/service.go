@@ -9,8 +9,11 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/components/embedding"
+	"github.com/cloudwego/eino/components/indexer"
+	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 
+	"eino-tutorial/internal/docconv"
 	"eino-tutorial/internal/fileimport"
 	"eino-tutorial/internal/textsplitter"
 	"eino-tutorial/internal/utils"
@@ -82,6 +85,56 @@ func (s *Service) AddDocument(id, content string) error {
 
 	utils.DebugLog("成功添加文档 %s，切分为 %d 个分块", id, len(chunks))
 	return nil
+}
+
+// Store 实现 Eino Indexer 接口，存储文档
+func (s *Service) Store(ctx context.Context, docs []*schema.Document, opts ...indexer.Option) (ids []string, err error) {
+	if s.vectorstore == nil {
+		return nil, fmt.Errorf("向量存储未初始化")
+	}
+
+	// 使用 Eino 官方推荐的 GetCommonOptions 解析选项
+	commonOpts := indexer.GetCommonOptions(&indexer.Options{}, opts...)
+
+	// 如果传入的 Embedding 选项不为空，优先使用
+	embedder := commonOpts.Embedding
+	if embedder == nil {
+		embedder = s.embedder
+	}
+
+	if embedder == nil {
+		return nil, fmt.Errorf("嵌入器未初始化，请通过 indexer.WithEmbedding 选项传入")
+	}
+
+	// 转换为自定义 Document
+	customDocs := make([]*vectorstore.Document, 0, len(docs))
+	ids = make([]string, 0, len(docs))
+
+	for _, doc := range docs {
+		customDoc, err := docconv.SchemaToCustom(doc)
+		if err != nil {
+			return nil, fmt.Errorf("文档转换失败: %w", err)
+		}
+
+		// 如果没有向量，则生成
+		if customDoc.Vector == nil || len(customDoc.Vector) == 0 {
+			embeddings, err := embedder.EmbedStrings(ctx, []string{doc.Content})
+			if err != nil {
+				return nil, fmt.Errorf("生成向量失败: %w", err)
+			}
+			customDoc.Vector = embeddings[0]
+		}
+
+		customDocs = append(customDocs, customDoc)
+		ids = append(ids, customDoc.ID)
+	}
+
+	// 批量插入
+	if err := s.vectorstore.InsertDocuments(ctx, customDocs); err != nil {
+		return nil, fmt.Errorf("插入向量存储失败: %w", err)
+	}
+
+	return ids, nil
 }
 
 // AddFile 导入单个文件
