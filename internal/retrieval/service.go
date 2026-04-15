@@ -8,6 +8,7 @@ import (
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/schema"
 
+	"eino-tutorial/internal/utils"
 	"eino-tutorial/internal/vectorstore"
 )
 
@@ -16,7 +17,7 @@ type Service struct {
 	ctx          context.Context
 	embedder     embedding.Embedder
 	schemaReader vectorstore.SchemaDocumentReader
-	// 注意：ctx 作为字段是阶段性设计，后续标准化时应改为由方法显式传入 ctx
+	// ctx 作为字段存储，后续标准化时应改为由方法显式传入 ctx
 }
 
 // NewService 创建文档检索服务
@@ -53,7 +54,7 @@ func (s *Service) Retrieve(ctx context.Context, query string, opts ...retriever.
 		topK = *commonOpts.TopK
 	}
 
-	// ScoreThreshold 等其他选项通过 GetCommonOptions 正确接收，但本阶段暂不执行
+	// ScoreThreshold 等其他选项通过 GetCommonOptions 正确接收，暂未执行过滤逻辑
 
 	// 生成查询向量
 	embeddings, err := embedder.EmbedStrings(ctx, []string{query})
@@ -62,7 +63,7 @@ func (s *Service) Retrieve(ctx context.Context, query string, opts ...retriever.
 	}
 
 	queryEmbedding := embeddings[0]
-	queryVec := float64ToFloat32(queryEmbedding)
+	queryVec := utils.Float64ToFloat32(queryEmbedding)
 
 	// 直接调用 SearchSchemaDocuments
 	schemaDocs, err := s.schemaReader.SearchSchemaDocuments(ctx, queryVec, topK)
@@ -71,16 +72,4 @@ func (s *Service) Retrieve(ctx context.Context, query string, opts ...retriever.
 	}
 
 	return schemaDocs, nil
-}
-
-// float64ToFloat32 将 float64 切片转换为 float32 切片
-func float64ToFloat32(vec []float64) []float32 {
-	if vec == nil {
-		return nil
-	}
-	result := make([]float32, len(vec))
-	for i, v := range vec {
-		result[i] = float32(v)
-	}
-	return result
 }

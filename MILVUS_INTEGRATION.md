@@ -2,9 +2,11 @@
 
 ## 概述
 
-本项目已成功集成 Milvus 向量数据库，替换了原有的内存向量存储。新的架构支持：
+本项目已成功集成 Milvus 向量数据库，使用 Eino 标准接口实现 RAG 功能。新的架构支持：
 
 - Milvus 向量数据库存储和检索
+- 基于 Eino schema.Document 的标准文档模型
+- SchemaDocumentWriter/Reader 接口设计
 - 文本自动切分
 - 批量文档插入
 - 向量维度自动校验
@@ -111,31 +113,40 @@ go run cmd/main.go
 ```
 internal/
 ├── vectorstore/
-│   ├── interface.go           # VectorStore 接口定义
+│   ├── interface.go      # SchemaDocumentWriter/Reader 接口
 │   └── milvus/
-│       ├── milvus.go         # Milvus 客户端实现
-│       └── collection.go     # Collection 管理
+│       ├── milvus.go    # MilvusStore 实现
+│       ├── mapper.go    # schema.Document ↔ MilvusRow 转换
+│       ├── repository.go # Milvus 数据访问层
+│       └── collection.go # Collection 管理
 └── textsplitter/
-    └── textsplitter.go       # 文本切分实现
+    └── textsplitter.go   # 文本切分实现
 ```
 
 ### 数据流程
 
 1. **添加文档流程**：
    ```
-   用户输入 → 文本切分 → 批量生成向量 → Milvus 插入 → Flush → LoadCollection
+   用户输入 → 文本切分 → 生成向量 → schema.Document → MilvusRow → Milvus 插入 → Flush → LoadCollection
    ```
 
 2. **搜索流程**：
    ```
-   用户查询 → 生成查询向量 → Milvus 搜索 → 返回结果 → RAG 生成
+   用户查询 → 生成查询向量 → Milvus 搜索 → MilvusRow → schema.Document → RAG 生成
    ```
 
 ### 向量类型处理
 
 - 业务层：使用 `[]float64`（豆包 embedding 返回类型）
 - Milvus 内部：使用 `[]float32` 存储
-- Store 层：自动转换 `float64` ↔ `float32`
+- 转换层：通过 `utils.Float64ToFloat32` 和 `utils.Float32ToFloat64` 转换
+
+### 分层设计
+
+- **MilvusStore**: 对外提供 SchemaDocumentWriter/Reader 接口
+- **Mapper**: 负责 schema.Document ↔ MilvusRow 的转换
+- **Repository**: 负责 Milvus 数据库的直接操作
+- **Collection**: 负责 Milvus Collection 的创建和管理
 
 ## 关键实现细节
 
@@ -163,13 +174,14 @@ contentVarCol, ok := contentCol.(*entity.ColumnVarChar)
 - `entity.NewColumnString` 创建的是 String 类型列，与 VarChar 字段定义不匹配
 - Milvus 会报错：`param column id has type String but collection field definition is string`
 
-### 1. Insert 后确保数据可搜索
+### 1. InsertSchemaDocuments 后确保数据可搜索
 
 ```go
-InsertDocuments 流程：
-1. Insert 批量插入
-2. Flush 刷写到磁盘
-3. LoadCollection 加载到内存
+InsertSchemaDocuments 流程：
+1. schema.Document 转换为 MilvusRow
+2. Insert 批量插入
+3. Flush 刷写到磁盘
+4. LoadCollection 加载到内存
 ```
 
 ### 2. Search 指定 output_fields

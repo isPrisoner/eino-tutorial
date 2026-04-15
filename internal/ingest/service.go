@@ -26,7 +26,7 @@ type Service struct {
 	embedder     embedding.Embedder
 	schemaWriter vectorstore.SchemaDocumentWriter
 	textsplitter *textsplitter.TextSplitter
-	// 注意：ctx 作为字段是阶段性设计，后续标准化时应改为由方法显式传入 ctx
+	// ctx 作为字段存储，后续标准化时应改为由方法显式传入 ctx
 }
 
 // NewService 创建文档入库服务
@@ -73,7 +73,7 @@ func (s *Service) ImportText(id, content, source string) (docID string, chunkCou
 		schemaDocs = append(schemaDocs, schemaDoc)
 	}
 
-	// 3. 调用 Store 方法（桥接到标准接口）
+	// 3. 调用 Store 方法
 	_, err = s.Store(s.ctx, schemaDocs)
 	if err != nil {
 		return "", 0, fmt.Errorf("存储文档失败: %w", err)
@@ -134,7 +134,7 @@ func (s *Service) ImportFile(filePath string) (docID string, chunkCount int, err
 		schemaDocs = append(schemaDocs, schemaDoc)
 	}
 
-	// 6. 调用 Store 方法（桥接到标准接口）
+	// 6. 调用 Store 方法
 	_, err = s.Store(s.ctx, schemaDocs)
 	if err != nil {
 		return "", 0, fmt.Errorf("存储文档失败: %w", err)

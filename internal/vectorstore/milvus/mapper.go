@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 
 	"github.com/cloudwego/eino/schema"
+
+	"eino-tutorial/internal/utils"
 )
 
 // MilvusRow Milvus 持久化行模型
@@ -18,30 +20,6 @@ type MilvusRow struct {
 	Score        float64 // 检索时的相似度分数
 }
 
-// float64ToFloat32 将 float64 切片转换为 float32 切片
-func float64ToFloat32(vec []float64) []float32 {
-	if vec == nil {
-		return nil
-	}
-	result := make([]float32, len(vec))
-	for i, v := range vec {
-		result[i] = float32(v)
-	}
-	return result
-}
-
-// float32ToFloat64 将 float32 切片转换为 float64 切片
-func float32ToFloat64(vec []float32) []float64 {
-	if vec == nil {
-		return nil
-	}
-	result := make([]float64, len(vec))
-	for i, v := range vec {
-		result[i] = float64(v)
-	}
-	return result
-}
-
 // SchemaToRow 将 schema.Document 转换为 MilvusRow
 func SchemaToRow(doc *schema.Document) (*MilvusRow, error) {
 	metadataJSON, err := serializeMetadataFromAny(doc.MetaData)
@@ -52,7 +30,7 @@ func SchemaToRow(doc *schema.Document) (*MilvusRow, error) {
 	vector := doc.DenseVector()
 	var vector32 []float32
 	if vector != nil {
-		vector32 = float64ToFloat32(vector)
+		vector32 = utils.Float64ToFloat32(vector)
 	}
 
 	return &MilvusRow{
@@ -93,7 +71,7 @@ func RowToSchema(row *MilvusRow) (*schema.Document, error) {
 
 	// 设置向量
 	if row.Vector != nil {
-		schemaDoc = schemaDoc.WithDenseVector(float32ToFloat64(row.Vector))
+		schemaDoc = schemaDoc.WithDenseVector(utils.Float32ToFloat64(row.Vector))
 	}
 
 	// 设置分数

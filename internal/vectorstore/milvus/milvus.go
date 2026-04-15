@@ -19,7 +19,7 @@ func debugLog(format string, args ...interface{}) {
 	}
 }
 
-// MilvusStore Milvus 向量存储实现（过渡壳）
+// MilvusStore Milvus 向量存储实现
 type MilvusStore struct {
 	client         client.Client
 	address        string
