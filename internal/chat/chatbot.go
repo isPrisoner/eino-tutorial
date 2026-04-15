@@ -9,13 +9,13 @@ import (
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/schema"
 	"github.com/volcengine/volcengine-go-sdk/service/arkruntime"
 	arkruntimeModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 
 	"eino-tutorial/internal/retrieval"
 	"eino-tutorial/internal/utils"
-	"eino-tutorial/internal/vectorstore"
 )
 
 // ChatBot 聊天机器人结构体
@@ -221,27 +221,56 @@ func (cb *ChatBot) Summarize(content, style string, maxLength int) error {
 }
 
 // getDocID 获取文档 ID
-func (cb *ChatBot) getDocID(doc *vectorstore.Document) string {
-	return doc.DocID
+func (cb *ChatBot) getDocID(doc *schema.Document) string {
+	if doc.MetaData == nil {
+		return ""
+	}
+	if val, ok := doc.MetaData["doc_id"].(string); ok {
+		return val
+	}
+	return ""
 }
 
-// getChunkIndex 获取分块索引
-func (cb *ChatBot) getChunkIndex(doc *vectorstore.Document) int64 {
-	return doc.ChunkIndex
+// getChunkIndex 获取分块索引（安全兼容型）
+func (cb *ChatBot) getChunkIndex(doc *schema.Document) int64 {
+	if doc.MetaData == nil {
+		return 0
+	}
+	val, ok := doc.MetaData["chunk_index"]
+	if !ok {
+		return 0
+	}
+	// 优先兼容 int64
+	if v, ok := val.(int64); ok {
+		return v
+	}
+	// 兼容 int
+	if v, ok := val.(int); ok {
+		return int64(v)
+	}
+	// 兼容 float64
+	if v, ok := val.(float64); ok {
+		return int64(v)
+	}
+	// 兼容 float32
+	if v, ok := val.(float32); ok {
+		return int64(v)
+	}
+	return 0
 }
 
 // getScore 获取相似度分数
-func (cb *ChatBot) getScore(doc *vectorstore.Document) float64 {
-	return doc.Score
+func (cb *ChatBot) getScore(doc *schema.Document) float64 {
+	return doc.Score()
 }
 
 // getContent 获取文档内容
-func (cb *ChatBot) getContent(doc *vectorstore.Document) string {
+func (cb *ChatBot) getContent(doc *schema.Document) string {
 	return doc.Content
 }
 
 // getDocDedupKey 生成文档去重 key
-func (cb *ChatBot) getDocDedupKey(doc *vectorstore.Document) string {
+func (cb *ChatBot) getDocDedupKey(doc *schema.Document) string {
 	return fmt.Sprintf("%s:%d", cb.getDocID(doc), cb.getChunkIndex(doc))
 }
 
@@ -254,7 +283,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	}
 
 	// 搜索相关文档
-	docs, err := cb.retrievalService.SearchDocuments(query, cb.ragTopK)
+	docs, err := cb.retrievalService.Retrieve(cb.ctx, query, retriever.WithTopK(cb.ragTopK))
 	if err != nil {
 		return fmt.Errorf("搜索文档失败: %w", err)
 	}
@@ -266,7 +295,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	}
 
 	// 1. 分数阈值过滤
-	var filteredDocs []*vectorstore.Document
+	var filteredDocs []*schema.Document
 	for _, doc := range docs {
 		if cb.getScore(doc) >= cb.ragMinScore {
 			filteredDocs = append(filteredDocs, doc)
@@ -281,7 +310,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	}
 
 	// 3. 第一层去重：按 doc_id + chunk_index
-	uniqueDocs := make(map[string]*vectorstore.Document) // key: doc_id:chunk_index
+	uniqueDocs := make(map[string]*schema.Document) // key: doc_id:chunk_index
 	for _, doc := range filteredDocs {
 		key := cb.getDocDedupKey(doc)
 		existing, exists := uniqueDocs[key]
@@ -292,7 +321,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 
 	// 4. 第二层去重：按 content 兜底
 	seenContent := make(map[string]bool)
-	var dedupedDocs []*vectorstore.Document
+	var dedupedDocs []*schema.Document
 	for _, doc := range uniqueDocs {
 		if !seenContent[cb.getContent(doc)] {
 			seenContent[cb.getContent(doc)] = true
