@@ -4,6 +4,8 @@ go 1.24.12
 
 require (
 	github.com/cloudwego/eino v0.8.6
+	github.com/cloudwego/eino-ext/components/document/transformer/splitter/markdown v0.0.0-20260415031821-e2fcf1501241
+	github.com/cloudwego/eino-ext/components/document/transformer/splitter/recursive v0.0.0-20260415031821-e2fcf1501241
 	github.com/cloudwego/eino-ext/components/model/ark v0.1.65
 	github.com/google/uuid v1.6.0
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2

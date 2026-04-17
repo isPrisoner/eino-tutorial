@@ -349,4 +349,3 @@ func (c *ChatBot) Chat(ctx context.Context, query string) (string, error) {
 - [Eino 文档](https://github.com/cloudwego/eino)
 - [Milvus 文档](https://milvus.io/docs)
 - [MILVUS_INTEGRATION.md](./MILVUS_INTEGRATION.md) - Milvus 集成详细说明
-- [MIGRATION.md](./MIGRATION.md) - 项目重构演进说明

@@ -15,7 +15,7 @@ import (
 	"eino-tutorial/internal/cli"
 	"eino-tutorial/internal/ingest"
 	"eino-tutorial/internal/retrieval"
-	"eino-tutorial/internal/textsplitter"
+	"eino-tutorial/internal/transformer"
 	"eino-tutorial/internal/utils"
 	milvusStore "eino-tutorial/internal/vectorstore/milvus"
 )
@@ -104,8 +104,8 @@ func main() {
 		store = nil
 	}
 
-	// 4. 创建文本切分器
-	var splitter *textsplitter.TextSplitter
+	// 4. 创建 Transformer Router
+	var transformerRouter *transformer.Router
 	if store != nil {
 		chunkSize := 500
 		if sizeStr := os.Getenv("CHUNK_SIZE"); sizeStr != "" {
@@ -121,16 +121,27 @@ func main() {
 			}
 		}
 
-		splitter = textsplitter.NewTextSplitter(chunkSize, chunkOverlap)
-		utils.DebugLog("文本切分器已启用 (chunk_size=%d, chunk_overlap=%d)", chunkSize, chunkOverlap)
+		// 创建 Markdown Splitter
+		markdownSplitter, err := transformer.NewMarkdownSplitter(ctx)
+		if err != nil {
+			log.Printf("创建 Markdown Splitter 失败: %v (将使用 Text Splitter)", err)
+			markdownSplitter = nil
+		}
+
+		// 创建 Text Splitter
+		textSplitter := transformer.NewTextSplitter(chunkSize, chunkOverlap)
+
+		// 创建 Router
+		transformerRouter = transformer.NewRouter(markdownSplitter, textSplitter)
+		utils.DebugLog("Transformer Router 已创建 (chunk_size=%d, chunk_overlap=%d)", chunkSize, chunkOverlap)
 	} else {
-		splitter = nil
+		transformerRouter = nil
 	}
 
 	// 5. 创建 ingest 服务
 	var ingestService *ingest.Service
-	if store != nil && splitter != nil {
-		ingestService = ingest.NewService(ctx, embedder, store, splitter)
+	if store != nil && transformerRouter != nil {
+		ingestService = ingest.NewServiceWithTransformer(ctx, embedder, store, transformerRouter)
 	}
 
 	// 5.5 创建 retrieval 服务

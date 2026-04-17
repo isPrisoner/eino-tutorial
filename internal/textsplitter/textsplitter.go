@@ -1,5 +1,10 @@
 package textsplitter
 
+// Deprecated: 使用 internal/transformer 替代
+// 本包已废弃，请使用 internal/transformer 中的 Eino 官方 Document Transformer 组件
+// - Markdown 文件使用 internal/transformer.MarkdownSplitter
+// - 其他文本文件使用 internal/transformer.TextSplitter
+
 import (
 	"strings"
 )

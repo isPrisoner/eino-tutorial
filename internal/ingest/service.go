@@ -16,6 +16,7 @@ import (
 	"eino-tutorial/internal/docconv"
 	"eino-tutorial/internal/fileimport"
 	"eino-tutorial/internal/textsplitter"
+	"eino-tutorial/internal/transformer"
 	"eino-tutorial/internal/utils"
 	"eino-tutorial/internal/vectorstore"
 )
@@ -26,10 +27,11 @@ type Service struct {
 	embedder     embedding.Embedder
 	schemaWriter vectorstore.SchemaDocumentWriter
 	textsplitter *textsplitter.TextSplitter
+	transformer  *transformer.Router
 	// ctx 作为字段存储，后续标准化时应改为由方法显式传入 ctx
 }
 
-// NewService 创建文档入库服务
+// NewService 创建文档入库服务（使用旧 textsplitter，保持向后兼容）
 func NewService(ctx context.Context, embedder embedding.Embedder, writer vectorstore.SchemaDocumentWriter, ts *textsplitter.TextSplitter) *Service {
 	return &Service{
 		ctx:          ctx,
@@ -39,12 +41,27 @@ func NewService(ctx context.Context, embedder embedding.Embedder, writer vectors
 	}
 }
 
+// NewServiceWithTransformer 创建文档入库服务（使用新 transformer）
+func NewServiceWithTransformer(ctx context.Context, embedder embedding.Embedder, writer vectorstore.SchemaDocumentWriter, tr *transformer.Router) *Service {
+	return &Service{
+		ctx:          ctx,
+		embedder:     embedder,
+		schemaWriter: writer,
+		transformer:  tr,
+	}
+}
+
 // ImportText 导入文本内容（应用层导入入口）
 // id: 文档 ID（可以为空，自动生成）
 // content: 文档内容
 // source: 来源标识（如 "manual"、"file" 等）
 // 返回: 文档 ID 和分块数量
 func (s *Service) ImportText(id, content, source string) (docID string, chunkCount int, err error) {
+	// 优先使用 transformer，如果不可用则使用 textsplitter（向后兼容）
+	if s.transformer != nil {
+		return s.importTextWithTransformer(id, content, source)
+	}
+
 	if s.textsplitter == nil {
 		return "", 0, fmt.Errorf("文本切分器未初始化")
 	}
@@ -83,10 +100,60 @@ func (s *Service) ImportText(id, content, source string) (docID string, chunkCou
 	return id, len(chunks), nil
 }
 
+// importTextWithTransformer 使用 transformer 进行文本导入
+func (s *Service) importTextWithTransformer(id, content, source string) (docID string, chunkCount int, err error) {
+	// 如果 id 为空，自动生成
+	if id == "" {
+		id = uuid.New().String()
+	}
+
+	// 1. 构建单个 schema.Document（包含完整内容）
+	metadata := map[string]any{
+		"doc_id":          id,
+		"source":          source,
+		"original_length": strconv.Itoa(len(content)),
+	}
+	schemaDoc := docconv.BuildSchemaDocument(uuid.New().String(), content, metadata)
+
+	// 2. 调用 transformer.Transform() 进行切分
+	transformedDocs, err := s.transformer.Transform(s.ctx, []*schema.Document{schemaDoc})
+	if err != nil {
+		return "", 0, fmt.Errorf("文档切分失败: %w", err)
+	}
+
+	if len(transformedDocs) == 0 {
+		return "", 0, fmt.Errorf("文档切分后没有有效分块")
+	}
+
+	// 3. 为切分后的文档补充 chunk_index metadata
+	for i, doc := range transformedDocs {
+		if doc.MetaData == nil {
+			doc.MetaData = make(map[string]any)
+		}
+		doc.MetaData["chunk_index"] = int64(i)
+		// 确保保留原始的 doc_id
+		doc.MetaData["doc_id"] = id
+	}
+
+	// 4. 调用 Store 方法
+	_, err = s.Store(s.ctx, transformedDocs)
+	if err != nil {
+		return "", 0, fmt.Errorf("存储文档失败: %w", err)
+	}
+
+	utils.DebugLog("成功导入文本 %s，切分为 %d 个分块", id, len(transformedDocs))
+	return id, len(transformedDocs), nil
+}
+
 // ImportFile 导入文件（应用层导入入口）
 // filePath: 文件路径
 // 返回: 文档 ID 和分块数量
 func (s *Service) ImportFile(filePath string) (docID string, chunkCount int, err error) {
+	// 优先使用 transformer，如果不可用则使用 textsplitter（向后兼容）
+	if s.transformer != nil {
+		return s.importFileWithTransformer(filePath)
+	}
+
 	if s.textsplitter == nil {
 		return "", 0, fmt.Errorf("文本切分器未初始化")
 	}
@@ -142,6 +209,74 @@ func (s *Service) ImportFile(filePath string) (docID string, chunkCount int, err
 
 	utils.DebugLog("成功导入文件 %s，切分为 %d 个分块", docID, len(chunks))
 	return docID, len(chunks), nil
+}
+
+// importFileWithTransformer 使用 transformer 进行文件导入
+func (s *Service) importFileWithTransformer(filePath string) (docID string, chunkCount int, err error) {
+	// 1. 读取文件内容
+	content, err := fileimport.ReadFileContent(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("读取文件失败: %w", err)
+	}
+
+	if len(content) == 0 {
+		return "", 0, fmt.Errorf("文件内容为空")
+	}
+
+	// 2. 获取文件信息
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("获取文件绝对路径失败: %w", err)
+	}
+
+	ext := filepath.Ext(filePath)
+
+	// 3. 生成文档 ID
+	docID = uuid.New().String()
+
+	// 4. 构建单个 schema.Document（包含完整内容）
+	metadata := map[string]any{
+		"doc_id":          docID,
+		"source":          absPath,
+		"filename":        filepath.Base(filePath),
+		"filepath":        absPath,
+		"original_length": strconv.Itoa(len(content)),
+		"file_type":       strings.TrimPrefix(ext, "."),
+	}
+	schemaDoc := docconv.BuildSchemaDocument(uuid.New().String(), content, metadata)
+
+	// 5. 调用 transformer.Transform() 进行切分（Router 会根据文件扩展名选择合适的 splitter）
+	transformedDocs, err := s.transformer.Transform(s.ctx, []*schema.Document{schemaDoc})
+	if err != nil {
+		return "", 0, fmt.Errorf("文档切分失败: %w", err)
+	}
+
+	if len(transformedDocs) == 0 {
+		return "", 0, fmt.Errorf("文档切分后没有有效分块")
+	}
+
+	// 6. 为切分后的文档补充 chunk_index metadata
+	for i, doc := range transformedDocs {
+		if doc.MetaData == nil {
+			doc.MetaData = make(map[string]any)
+		}
+		doc.MetaData["chunk_index"] = int64(i)
+		// 确保保留原始的 doc_id 和其他文件相关 metadata
+		doc.MetaData["doc_id"] = docID
+		doc.MetaData["source"] = absPath
+		doc.MetaData["filename"] = filepath.Base(filePath)
+		doc.MetaData["filepath"] = absPath
+		doc.MetaData["file_type"] = strings.TrimPrefix(ext, ".")
+	}
+
+	// 7. 调用 Store 方法
+	_, err = s.Store(s.ctx, transformedDocs)
+	if err != nil {
+		return "", 0, fmt.Errorf("存储文档失败: %w", err)
+	}
+
+	utils.DebugLog("成功导入文件 %s，切分为 %d 个分块", docID, len(transformedDocs))
+	return docID, len(transformedDocs), nil
 }
 
 // ImportDir 导入目录（应用层导入入口）
