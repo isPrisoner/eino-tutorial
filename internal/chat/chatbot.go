@@ -2,7 +2,9 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -10,11 +12,13 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 	"github.com/volcengine/volcengine-go-sdk/service/arkruntime"
 	arkruntimeModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 
 	"eino-tutorial/internal/retrieval"
+	"eino-tutorial/internal/tools"
 	"eino-tutorial/internal/utils"
 )
 
@@ -29,6 +33,7 @@ type ChatBot struct {
 	ragTopK             int
 	ragMaxContextLen    int
 	ragMaxContextChunks int
+	tools               []tool.InvokableTool // 工具列表
 }
 
 // VolcengineEmbedder 火山引擎嵌入器实现
@@ -83,7 +88,7 @@ func (ve *VolcengineEmbedder) EmbedStrings(ctx context.Context, texts []string, 
 }
 
 // NewChatBot 创建新的聊天机器人实例
-func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, retrievalService *retrieval.Service, ragMinScore float64, ragTopK int, ragMaxContextLen int, ragMaxContextChunks int) *ChatBot {
+func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, retrievalService *retrieval.Service, ragMinScore float64, ragTopK int, ragMaxContextLen int, ragMaxContextChunks int, tools []tool.InvokableTool) *ChatBot {
 	bot := &ChatBot{
 		model: chatModel,
 		ctx:   ctx,
@@ -96,6 +101,7 @@ func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, retrievalSer
 		ragTopK:             ragTopK,
 		ragMaxContextLen:    ragMaxContextLen,
 		ragMaxContextChunks: ragMaxContextChunks,
+		tools:               tools,
 	}
 
 	// 初始化模板
@@ -156,7 +162,7 @@ func (cb *ChatBot) UseTemplate(templateName string, params map[string]interface{
 	for {
 		chunk, err := reader.Recv()
 		if err != nil {
-			if err.Error() == "EOF" {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return fmt.Errorf("接收流式数据失败: %w", err)
@@ -371,6 +377,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 3. 如果上下文中有多个相关点，请全部列出
 4. 如果上下文中包含多个答案，必须完整列出全部答案，不要遗漏
 5. 严格基于上下文回答，不要编造信息
+6. 当前已提供RAG检索的上下文，请优先使用这些上下文回答。只有在上下文信息明显不足或用户明确要求补充检索时，才考虑调用search_docs工具进行补充检索。
 
 【上下文】
 %s
@@ -389,7 +396,132 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	// 添加临时 RAG promptWord（不污染长期历史）
 	cb.messages = append(cb.messages, schema.UserMessage(promptWord))
 
-	// 获取流式回复
+	// 尝试使用工具（如果可用）
+	if len(cb.tools) > 0 {
+		// 检查ChatModel是否支持Tool Calling
+		if tcModel, ok := cb.model.(interface {
+			WithTools([]*schema.ToolInfo) (interface{}, error)
+		}); ok {
+			// 获取工具信息
+			toolInfos := make([]*schema.ToolInfo, 0, len(cb.tools))
+			for _, t := range cb.tools {
+				info, err := t.Info(cb.ctx)
+				if err != nil {
+					utils.DebugLog("获取工具信息失败: %v", err)
+					continue
+				}
+				toolInfos = append(toolInfos, info)
+			}
+
+			if len(toolInfos) > 0 {
+				// 绑定工具到ChatModel
+				modelWithTools, err := tcModel.WithTools(toolInfos)
+				if err != nil {
+					utils.DebugLog("绑定工具失败: %v", err)
+				} else {
+					// 使用带工具的ChatModel
+					if streamModel, ok := modelWithTools.(interface {
+						Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error)
+					}); ok {
+						reader, err := streamModel.Stream(cb.ctx, cb.messages, opts...)
+						if err != nil {
+							return fmt.Errorf("创建流式请求失败: %w", err)
+						}
+						defer reader.Close()
+
+						// 处理流式内容
+						var fullMessage *schema.Message
+						for {
+							chunk, err := reader.Recv()
+							if err != nil {
+								if errors.Is(err, io.EOF) {
+									break
+								}
+								return fmt.Errorf("接收流式数据失败: %w", err)
+							}
+
+							// 合并消息碎片
+							if fullMessage == nil {
+								fullMessage = chunk
+							} else {
+								fullMessage, _ = schema.ConcatMessages([]*schema.Message{fullMessage, chunk})
+							}
+
+							// 实时输出
+							if chunk.Content != "" {
+								fmt.Print(chunk.Content)
+							}
+						}
+
+						// 检查是否有工具调用
+						if len(fullMessage.ToolCalls) > 0 {
+							utils.DebugLog("检测到工具调用，数量: %d", len(fullMessage.ToolCalls))
+
+							// 执行工具调用（单轮）
+							toolMessages := make([]*schema.Message, 0, len(fullMessage.ToolCalls))
+							for _, toolCall := range fullMessage.ToolCalls {
+								if toolCall.Function.Name != "" {
+									utils.DebugLog("调用工具: id=%s, name=%s, 参数长度: %d", toolCall.ID, toolCall.Function.Name, len(toolCall.Function.Arguments))
+									result, err := tools.ExecuteTool(cb.ctx, cb.tools, toolCall.Function.Name, toolCall.Function.Arguments)
+									if err != nil {
+										utils.DebugLog("工具执行失败: %v", err)
+										result = fmt.Sprintf("工具%s执行失败，请检查输入或重试", toolCall.Function.Name)
+									}
+									utils.DebugLog("工具执行成功，结果长度: %d", len(result))
+
+									// 构造tool message
+									toolMessage := schema.ToolMessage(toolCall.ID, result)
+									toolMessages = append(toolMessages, toolMessage)
+								}
+							}
+
+							// 将assistant message（含tool calls）和tool messages追加到对话历史
+							cb.messages = append(cb.messages, fullMessage)
+							cb.messages = append(cb.messages, toolMessages...)
+
+							// 让模型基于工具结果生成最终答案
+							utils.DebugLog("基于工具结果生成最终答案")
+							finalReader, err := cb.model.Stream(cb.ctx, cb.messages, opts...)
+							if err != nil {
+								return fmt.Errorf("生成最终答案失败: %w", err)
+							}
+							defer finalReader.Close()
+
+							// 处理流式输出
+							var finalFullMessage *schema.Message
+							for {
+								chunk, err := finalReader.Recv()
+								if err != nil {
+									if errors.Is(err, io.EOF) {
+										break
+									}
+									return fmt.Errorf("接收最终答案失败: %w", err)
+								}
+
+								// 合并消息碎片
+								if finalFullMessage == nil {
+									finalFullMessage = chunk
+								} else {
+									finalFullMessage, _ = schema.ConcatMessages([]*schema.Message{finalFullMessage, chunk})
+								}
+
+								// 实时输出
+								if chunk.Content != "" {
+									fmt.Print(chunk.Content)
+								}
+							}
+						}
+
+						// 恢复消息历史（移除临时 RAG promptWord）
+						cb.messages = cb.messages[:prevMessageCount]
+						return nil
+					}
+				}
+			}
+		}
+	}
+
+	// 回退到原有的RAG流程（不带工具）
 	reader, err := cb.model.Stream(cb.ctx, cb.messages, opts...)
 	if err != nil {
 		return fmt.Errorf("创建流式请求失败: %w", err)
@@ -401,7 +533,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	for {
 		chunk, err := reader.Recv()
 		if err != nil {
-			if err.Error() == "EOF" {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return fmt.Errorf("接收流式数据失败: %w", err)
@@ -449,7 +581,7 @@ func (cb *ChatBot) ChatStream(userInput string, opts ...model.Option) error {
 	for {
 		chunk, err := reader.Recv()
 		if err != nil {
-			if err.Error() == "EOF" {
+			if errors.Is(err, io.EOF) {
 				break // 正常结束
 			}
 			return fmt.Errorf("接收流式数据失败: %w", err)

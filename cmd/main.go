@@ -10,11 +10,13 @@ import (
 
 	arkModel "github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/components/embedding"
+	"github.com/cloudwego/eino/components/tool"
 
 	"eino-tutorial/internal/chat"
 	"eino-tutorial/internal/cli"
 	"eino-tutorial/internal/ingest"
 	"eino-tutorial/internal/retrieval"
+	"eino-tutorial/internal/tools"
 	"eino-tutorial/internal/transformer"
 	"eino-tutorial/internal/utils"
 	milvusStore "eino-tutorial/internal/vectorstore/milvus"
@@ -156,8 +158,19 @@ func main() {
 	ragMaxContextLen := getEnvInt("RAG_MAX_CONTEXT_LEN", 2000)
 	ragMaxContextChunks := getEnvInt("RAG_MAX_CONTEXT_CHUNKS", 10)
 
-	// 7. 创建 ChatBot
-	chatBot := chat.NewChatBot(ctx, chatModel, retrievalService, ragMinScore, ragTopK, ragMaxContextLen, ragMaxContextChunks)
+	// 7. 创建工具列表
+	var toolList []tool.InvokableTool
+	if retrievalService != nil {
+		toolsNode, err := tools.NewToolsNode(ctx, retrievalService)
+		if err != nil {
+			log.Printf("创建工具列表失败: %v", err)
+		} else {
+			toolList = toolsNode
+		}
+	}
+
+	// 8. 创建 ChatBot
+	chatBot := chat.NewChatBot(ctx, chatModel, retrievalService, ragMinScore, ragTopK, ragMaxContextLen, ragMaxContextChunks, toolList)
 
 	// 8. 创建 CLI 处理器
 	handler := cli.NewHandler(chatBot, ingestService)
