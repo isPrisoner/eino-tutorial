@@ -17,6 +17,7 @@ import (
 	"github.com/volcengine/volcengine-go-sdk/service/arkruntime"
 	arkruntimeModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 
+	"eino-tutorial/internal/composition"
 	"eino-tutorial/internal/retrieval"
 	"eino-tutorial/internal/tools"
 	"eino-tutorial/internal/utils"
@@ -34,6 +35,7 @@ type ChatBot struct {
 	ragMaxContextLen    int
 	ragMaxContextChunks int
 	tools               []tool.InvokableTool // 工具列表
+	ragRunnable         interface{}          // RAG Graph Runnable实例
 }
 
 // VolcengineEmbedder 火山引擎嵌入器实现
@@ -106,6 +108,14 @@ func NewChatBot(ctx context.Context, chatModel model.BaseChatModel, retrievalSer
 
 	// 初始化模板
 	bot.initTemplates()
+
+	// 初始化Graph并Compile
+	runnable, err := composition.NewRAGGraph(retrievalService, chatModel, tools)
+	if err != nil {
+		fmt.Printf("警告：Graph编译失败: %v，将使用原有RAG实现\n", err)
+		// 不返回错误，允许Graph失败时使用原有实现
+	}
+	bot.ragRunnable = runnable
 
 	return bot
 }
@@ -282,6 +292,50 @@ func (cb *ChatBot) getDocDedupKey(doc *schema.Document) string {
 
 // ChatWithRAG 使用 RAG 进行对话
 func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
+	// 优先使用Graph编排
+	if cb.ragRunnable != nil {
+		// 检查检索服务是否可用
+		if cb.retrievalService == nil {
+			fmt.Println("AI (RAG): 知识库检索功能未启用，无法使用 RAG。请检查 EMBEDDER、ARK_EMBEDDER_API_KEY、MILVUS_ADDRESS 等配置。")
+			return nil
+		}
+
+		// 初始化Graph状态（使用Messages副本）
+		state := &composition.RAGGraphState{
+			UserInput: query,
+			Messages:  make([]*schema.Message, len(cb.messages)),
+		}
+		copy(state.Messages, cb.messages)
+
+		// 执行Graph
+		runnable, ok := cb.ragRunnable.(interface {
+			Invoke(context.Context, *composition.RAGGraphState, ...interface{}) (*composition.RAGGraphState, error)
+		})
+		if !ok {
+			fmt.Println("AI (RAG): Graph类型错误，回退到原有实现")
+			return cb.chatWithRAGFallback(query, opts...)
+		}
+
+		finalState, err := runnable.Invoke(cb.ctx, state)
+		if err != nil {
+			fmt.Printf("AI (RAG): Graph执行失败: %v，回退到原有实现\n", err)
+			return cb.chatWithRAGFallback(query, opts...)
+		}
+
+		// 消息历史策略：不改变长期cb.messages
+		// 保持原有语义：RAG对话不记录历史
+
+		_ = finalState // 暂时忽略返回值
+
+		return nil
+	}
+
+	// 回退到原有实现
+	return cb.chatWithRAGFallback(query, opts...)
+}
+
+// chatWithRAGFallback 原有RAG实现（回退方案）
+func (cb *ChatBot) chatWithRAGFallback(query string, opts ...model.Option) error {
 	// 检查检索服务是否可用
 	if cb.retrievalService == nil {
 		fmt.Println("AI (RAG): 知识库检索功能未启用，无法使用 RAG。请检查 EMBEDDER、ARK_EMBEDDER_API_KEY、MILVUS_ADDRESS 等配置。")
@@ -555,8 +609,7 @@ func (cb *ChatBot) ChatWithRAG(query string, opts ...model.Option) error {
 	// 恢复消息历史（移除临时 RAG promptWord）
 	cb.messages = cb.messages[:prevMessageCount]
 
-	// 只添加用户原问题和最终回答到历史
-	cb.messages = append(cb.messages, schema.UserMessage(query))
+	// 将最终回复添加到消息历史
 	if fullMessage != nil {
 		cb.messages = append(cb.messages, fullMessage)
 	}
